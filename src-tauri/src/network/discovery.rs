@@ -396,9 +396,9 @@ pub async fn stop_discovery_service() -> AppResult<()> {
 /// Discover a device by IP address
 #[tauri::command]
 pub async fn discover_device_by_ip(
-    ip: &str,
-    app_state: Arc<AppState>,
-    app_handle: AppHandle,
+    ip: String,
+    state: tauri::State<'_, Arc<AppState>>,
+    app_handle: tauri::AppHandle,
 ) -> AppResult<Option<DeviceInfo>> {
     use std::net::SocketAddr;
     use tokio::net::UdpSocket;
@@ -414,8 +414,8 @@ pub async fn discover_device_by_ip(
     let dest = SocketAddr::new(IpAddr::V4(ip_addr), DISCOVERY_PORT);
 
     let packet = DiscoveryPacket::announce(
-        app_state.device_id,
-        app_state.device_name.clone(),
+        state.device_id,
+        state.device_name.clone(),
         detect_os(),
         None,
         crate::core::QUIC_DEFAULT_PORT,
@@ -444,7 +444,7 @@ pub async fn discover_device_by_ip(
                     let device_info = packet.to_device_info(addr);
 
                     // Add to device list
-                    app_state.devices.insert(packet.device_id, device_info.clone());
+                    state.devices.insert(packet.device_id, device_info.clone());
                     let _ = app_handle.emit(DEVICE_ONLINE_EVENT, &device_info);
 
                     log::info!("Device discovered at {}: {} ({})", ip, device_info.device_name, device_info.device_id);

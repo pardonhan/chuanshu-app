@@ -43,6 +43,25 @@ export interface Settings {
   theme: 'auto' | 'light' | 'dark'
 }
 
+// Transfer history type
+export interface TransferHistoryEntry {
+  task_id: string
+  peer_device_name: string
+  transfer_type: 'send' | 'receive'
+  status: 'completed' | 'failed' | 'canceled' | 'pending' | 'transferring' | 'paused'
+  total_size: number
+  file_count: number
+  file_names: string | null
+  created_at: number
+  completed_at: number | null
+}
+
+// Transfer history query type
+export interface TransferHistoryQuery {
+  limit: number
+  offset: number
+}
+
 // IPC API functions
 export async function getDeviceList(): Promise<DeviceInfo[]> {
   return invoke('get_device_list')
@@ -78,6 +97,14 @@ export async function getSettings(): Promise<Settings> {
 
 export async function saveSettings(settings: Settings): Promise<void> {
   return invoke('save_settings', { settings })
+}
+
+export async function getTransferHistory(query: TransferHistoryQuery): Promise<TransferHistoryEntry[]> {
+  return invoke('get_transfer_history', { query })
+}
+
+export async function clearTransferHistory(): Promise<void> {
+  return invoke('clear_transfer_history')
 }
 
 // Event listeners

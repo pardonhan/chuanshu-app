@@ -40,6 +40,8 @@ pub fn run() {
             get_settings,
             save_settings,
             discover_device_by_ip,
+            get_transfer_history,
+            clear_transfer_history,
         ])
         .setup(move |app| {
             if cfg!(debug_assertions) {

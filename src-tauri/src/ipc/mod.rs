@@ -6,7 +6,7 @@ use uuid::Uuid;
 use crate::core::*;
 use crate::network::{DeviceInfo, discovery};
 use crate::transfer::TransferTaskInfo;
-use crate::storage::{get_storage, Storage};
+use crate::storage::{get_storage, Storage, TransferHistoryEntry};
 
 #[tauri::command]
 pub async fn get_device_list(state: State<'_, Arc<AppState>>) -> AppResult<Vec<DeviceInfo>> {
@@ -101,6 +101,28 @@ pub async fn save_settings(settings: Settings) -> AppResult<()> {
         storage.save_settings(&settings)?;
     }
     log::info!("Settings saved: device_name={}", settings.device_name);
+    Ok(())
+}
+
+/// Get transfer history with pagination
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct TransferHistoryQuery {
+    pub limit: i64,
+    pub offset: i64,
+}
+
+#[tauri::command]
+pub async fn get_transfer_history(query: TransferHistoryQuery) -> AppResult<Vec<TransferHistoryEntry>> {
+    let storage = get_storage().ok_or_else(|| crate::core::AppError::Other("Storage not initialized".to_string()))?;
+    let history = storage.get_transfer_history(query.limit, query.offset)?;
+    Ok(history)
+}
+
+/// Clear transfer history
+#[tauri::command]
+pub async fn clear_transfer_history() -> AppResult<()> {
+    let storage = get_storage().ok_or_else(|| crate::core::AppError::Other("Storage not initialized".to_string()))?;
+    storage.clear_transfer_history()?;
     Ok(())
 }
 

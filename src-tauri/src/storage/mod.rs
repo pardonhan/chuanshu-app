@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use rusqlite::{Connection, params, OptionalExtension};
 use uuid::Uuid;
+use serde::Serialize;
 
 use crate::core::AppResult;
 use crate::ipc::Settings;
@@ -242,6 +243,12 @@ impl Storage {
         Ok(entries)
     }
 
+    /// Clear transfer history
+    pub fn clear_transfer_history(&self) -> AppResult<()> {
+        self.conn.execute("DELETE FROM transfer_history", [])?;
+        Ok(())
+    }
+
     // ==================== Resume Info ====================
 
     /// Save resume info
@@ -387,7 +394,7 @@ impl Storage {
 }
 
 /// Transfer history entry
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct TransferHistoryEntry {
     pub task_id: String,
     pub peer_device_name: String,
