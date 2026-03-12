@@ -24,10 +24,8 @@ pub fn run() {
     let rt_for_cleanup = rt.clone();
 
     tauri::Builder::default()
-        // Plugins temporarily disabled to reduce build memory usage
-        // .plugin(tauri_plugin_notification::init())
-        // .plugin(tauri_plugin_dialog::init())
-        // .plugin(tauri_plugin_shell::init())
+        // Plugins
+        .plugin(tauri_plugin_fs::init())
         .manage(app_state.clone())
         .manage(rt.handle().clone())
         .invoke_handler(tauri::generate_handler![

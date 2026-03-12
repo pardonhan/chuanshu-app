@@ -18,7 +18,8 @@
         "resizable": true,
         "fullscreen": false,
         "minWidth": 800,
-        "minHeight": 600
+        "minHeight": 600,
+        "dragDropEnabled": true
       }
     ],
     "security": {
@@ -28,7 +29,10 @@
   "plugins": {
     "notification": {},
     "dialog": {},
-    "shell": {}
+    "shell": {},
+    "fs": {
+      "requireLiteralLeadingDot": false
+    }
   },
   "bundle": {
     "active": true,
