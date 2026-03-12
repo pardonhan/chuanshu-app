@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(rustc --version || echo \"Rust not installed\" && node --version || echo \"Node.js not installed\" && pnpm --version || echo \"pnpm not installed\" && cargo tauri --version || echo \"Tauri CLI not installed\")",
+      "Bash(cargo install:*)",
+      "Bash(pnpm add:*)",
+      "Bash(pnpm init:*)",
+      "Bash(echo '{\n  \"name\": \"chuanshu-app\",\n  \"version\": \"0.1.0\",\n  \"type\": \"module\",\n  \"scripts\": {\n    \"dev\": \"vite\",\n    \"build\": \"tsc && vite build\",\n    \"preview\": \"vite preview\",\n    \"tauri\": \"tauri\"\n  }\n}' > package.json && pnpm add @tauri-apps/cli@beta vite typescript @types/react @types/react-dom @vitejs/plugin-react react react-dom --save-dev)",
+      "Bash(pnpm tauri:*)",
+      "Bash(cd src-tauri/src && mkdir -p core network transfer storage ipc)",
+      "Bash(cargo check:*)",
+      "Bash(cd /Users/fenglinhan/learnPro/chuanshu-app && pnpm install 2>&1 | tail -10)",
+      "Bash(pnpm build:*)",
+      "Bash(pkill -f \"chuanshu-app\" 2>/dev/null; pkill -f \"tauri\" 2>/dev/null; sleep 1; echo \"Killed existing processes\")"
+    ]
+  }
+}

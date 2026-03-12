@@ -1,0 +1,67 @@
+[package]
+name = "chuanshu-app"
+version = "0.1.0"
+description = "跨平台局域网文件传输工具"
+authors = ["作者"]
+license = "MIT"
+repository = ""
+edition = "2021"
+rust-version = "1.77.2"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.0", features = [] }
+
+[dependencies]
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive", "rc"] }
+log = "0.4"
+tauri = { version = "2.0", features = [] }
+tauri-plugin-log = "2"
+
+# 异步运行时
+tokio = { version = "1.35", features = ["full"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+futures = "0.3"
+
+# 网络通信
+quinn = "0.10"
+rustls = "0.21"
+rustls-pemfile = "1.0"
+socket2 = { version = "0.5", features = ["all"] }
+if-addrs = "0.10"
+bytes = "1.5"
+
+# 文件处理
+memmap2 = "0.9"
+walkdir = "2.4"
+filetime = "0.2"
+
+# 数据校验
+xxhash-rust = { version = "0.8", features = ["xxh64"] }
+sha2 = "0.10"
+crc32fast = "1.3"
+
+# 序列化
+bincode = "1.3"
+
+# 存储
+rusqlite = { version = "0.29", features = ["bundled", "chrono"] }
+confy = "0.5"
+
+# 工具类
+uuid = { version = "1.6", features = ["v4", "serde"] }
+thiserror = "1.0"
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+chrono = { version = "0.4", features = ["serde"] }
+bitvec = "1.0"
+dashmap = "5.5"
+rcgen = "0.12"
+once_cell = "1.19"

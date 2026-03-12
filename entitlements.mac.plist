@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.network.client</key>
+    <true/>
+    <key>com.apple.security.network.server</key>
+    <true/>
+    <key>com.apple.security.files.user-selected.read-write</key>
+    <true/>
+    <key>com.apple.security.files.downloads.read-write</key>
+    <true/>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>需要访问局域网来发现设备和传输文件</string>
+    <key>NSDownloadsFolderUsageDescription</key>
+    <string>需要访问下载文件夹来保存接收的文件</string>
+</dict>
+</plist>
