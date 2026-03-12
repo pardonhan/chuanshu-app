@@ -44,7 +44,7 @@
       "entitlements": "../entitlements.mac.plist",
       "signingIdentity": null
     },
-    "Windows": {
+    "windows": {
       "nsis": {
         "installerIcon": "icons/icon.ico",
         "headerImage": "icons/header.bmp",

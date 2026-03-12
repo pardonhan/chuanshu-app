@@ -48,6 +48,10 @@ export async function getDeviceList(): Promise<DeviceInfo[]> {
   return invoke('get_device_list')
 }
 
+export async function discoverDeviceByIp(ip: string): Promise<DeviceInfo | null> {
+  return invoke('discover_device_by_ip', { ip })
+}
+
 export async function getTransferTasks(): Promise<TransferTaskInfo[]> {
   return invoke('get_transfer_tasks')
 }

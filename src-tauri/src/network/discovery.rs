@@ -392,3 +392,73 @@ pub async fn stop_discovery_service() -> AppResult<()> {
     }
     Ok(())
 }
+
+/// Discover a device by IP address
+pub async fn discover_device_by_ip(
+    ip: &str,
+    app_state: Arc<AppState>,
+    app_handle: AppHandle,
+) -> AppResult<Option<DeviceInfo>> {
+    use std::net::SocketAddr;
+    use tokio::net::UdpSocket;
+
+    // Parse the IP address
+    let ip_addr = ip.parse::<Ipv4Addr>()
+        .map_err(|e| AppError::Config(format!("Invalid IP address: {}", e)))?;
+
+    // Create UDP socket
+    let socket = UdpSocket::bind("0.0.0.0:0").await?;
+
+    // Send discovery packet
+    let dest = SocketAddr::new(IpAddr::V4(ip_addr), DISCOVERY_PORT);
+
+    let packet = DiscoveryPacket::announce(
+        app_state.device_id,
+        app_state.device_name.clone(),
+        detect_os(),
+        None,
+        crate::core::QUIC_DEFAULT_PORT,
+        vec![
+            Capability::FolderTransfer,
+            Capability::ResumeTransfer,
+            Capability::MultiDeviceSend,
+        ],
+    );
+
+    let data = packet.to_bytes()?;
+    socket.send_to(&data, dest).await?;
+
+    // Wait for response with timeout
+    let mut buf = vec![0u8; 65535];
+    socket.set_read_timeout(Some(Duration::from_secs(3))).ok();
+
+    match tokio::time::timeout(
+        Duration::from_secs(3),
+        socket.recv_from(&mut buf)
+    ).await {
+        Ok(Ok((len, addr))) => {
+            if let Ok(packet) = DiscoveryPacket::from_bytes(&buf[..len]) {
+                if packet.message_type == crate::network::protocol::DiscoveryMessageType::Response
+                    && packet.protocol_version == crate::network::protocol::PROTOCOL_VERSION {
+
+                    let device_info = packet.to_device_info(addr);
+
+                    // Add to device list
+                    app_state.devices.insert(packet.device_id, device_info.clone());
+                    let _ = app_handle.emit(DEVICE_ONLINE_EVENT, &device_info);
+
+                    log::info!("Device discovered at {}: {} ({})", ip, device_info.device_name, device_info.device_id);
+                    return Ok(Some(device_info));
+                }
+            }
+        }
+        Ok(Err(e)) => {
+            log::debug!("UDP receive error: {}", e);
+        }
+        Err(_) => {
+            log::debug!("Discovery timeout for IP: {}", ip);
+        }
+    }
+
+    Ok(None)
+}
