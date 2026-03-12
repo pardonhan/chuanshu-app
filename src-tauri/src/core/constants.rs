@@ -3,7 +3,7 @@ pub const DISCOVERY_PORT: u16 = 45678;
 /// 设备发现心跳间隔（秒）
 pub const DISCOVERY_HEARTBEAT_INTERVAL: u64 = 3;
 /// 设备离线超时时间（秒）
-pub const DISCOVERY_TIMEOUT: u64 = 9;
+pub const DISCOVERY_TIMEOUT: u64 = 30;
 /// QUIC服务端默认端口
 pub const QUIC_DEFAULT_PORT: u16 = 45679;
 /// 最大并发传输任务数
