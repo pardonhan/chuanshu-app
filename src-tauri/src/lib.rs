@@ -39,7 +39,7 @@ pub fn run() {
             resume_transfer,
             get_settings,
             save_settings,
-            discover_device_by_ip
+            discover_device_by_ip,
         ])
         .setup(move |app| {
             if cfg!(debug_assertions) {

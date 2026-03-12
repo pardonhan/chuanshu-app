@@ -7,7 +7,7 @@ use tokio::sync::Mutex;
 use tokio::time::interval;
 use uuid::Uuid;
 
-use crate::core::{AppResult, AppState, DISCOVERY_HEARTBEAT_INTERVAL, DISCOVERY_PORT, DISCOVERY_TIMEOUT};
+use crate::core::{AppResult, AppError, AppState, DISCOVERY_HEARTBEAT_INTERVAL, DISCOVERY_PORT, DISCOVERY_TIMEOUT};
 use crate::network::device::{Capability, DeviceInfo, OperatingSystem};
 use crate::network::protocol::DiscoveryPacket;
 
@@ -394,6 +394,7 @@ pub async fn stop_discovery_service() -> AppResult<()> {
 }
 
 /// Discover a device by IP address
+#[tauri::command]
 pub async fn discover_device_by_ip(
     ip: &str,
     app_state: Arc<AppState>,
@@ -430,7 +431,6 @@ pub async fn discover_device_by_ip(
 
     // Wait for response with timeout
     let mut buf = vec![0u8; 65535];
-    socket.set_read_timeout(Some(Duration::from_secs(3))).ok();
 
     match tokio::time::timeout(
         Duration::from_secs(3),

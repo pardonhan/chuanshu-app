@@ -104,15 +104,6 @@ pub async fn save_settings(settings: Settings) -> AppResult<()> {
     Ok(())
 }
 
-#[tauri::command]
-pub async fn discover_device_by_ip(
-    ip: String,
-    state: State<'_, Arc<AppState>>,
-    app_handle: tauri::AppHandle,
-) -> AppResult<Option<DeviceInfo>> {
-    discovery::discover_device_by_ip(&ip, state.inner().clone(), app_handle).await
-}
-
 /// Event names for frontend communication
 pub const DEVICE_ONLINE_EVENT: &str = "device-online";
 pub const DEVICE_OFFLINE_EVENT: &str = "device-offline";
