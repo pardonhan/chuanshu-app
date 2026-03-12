@@ -27,3 +27,6 @@ coverage
 # Tauri
 src-tauri/target
 src-tauri/**/*.pdb
+
+# Claude
+.claude/settings.local.json
