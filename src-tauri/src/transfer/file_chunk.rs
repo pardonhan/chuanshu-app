@@ -154,7 +154,7 @@ impl FileAssembler {
         // Pre-allocate file space
         #[cfg(target_os = "windows")]
         {
-            use std::os::windows::fs::FileExtExt;
+            use std::os::windows::fs::FileExt;
             file.set_len(file_size)?;
         }
         #[cfg(target_os = "macos")]
