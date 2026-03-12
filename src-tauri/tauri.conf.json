@@ -43,6 +43,13 @@
     "macOS": {
       "entitlements": "../entitlements.mac.plist",
       "signingIdentity": null
+    },
+    "windows": {
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "headerImage": "icons/header.bmp",
+        "languages": ["SimpChinese", "English"]
+      }
     }
   }
 }

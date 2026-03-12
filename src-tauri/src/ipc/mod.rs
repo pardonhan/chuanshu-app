@@ -4,7 +4,7 @@ use tauri::{Emitter, State};
 use tokio::runtime::Handle;
 use uuid::Uuid;
 use crate::core::*;
-use crate::network::DeviceInfo;
+use crate::network::{DeviceInfo, discovery};
 use crate::transfer::TransferTaskInfo;
 use crate::storage::{get_storage, Storage};
 
@@ -102,6 +102,15 @@ pub async fn save_settings(settings: Settings) -> AppResult<()> {
     }
     log::info!("Settings saved: device_name={}", settings.device_name);
     Ok(())
+}
+
+#[tauri::command]
+pub async fn discover_device_by_ip(
+    ip: String,
+    state: State<'_, Arc<AppState>>,
+    app_handle: tauri::AppHandle,
+) -> AppResult<Option<DeviceInfo>> {
+    discovery::discover_device_by_ip(&ip, state.inner().clone(), app_handle).await
 }
 
 /// Event names for frontend communication

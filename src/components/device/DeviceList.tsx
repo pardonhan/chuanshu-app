@@ -1,8 +1,8 @@
-import { useEffect, useCallback } from 'react'
-import { List, Avatar, Badge, Button, Space, Empty } from 'antd'
-import { DesktopOutlined, ReloadOutlined } from '@ant-design/icons'
+import { useEffect, useCallback, useState } from 'react'
+import { List, Avatar, Badge, Button, Space, Empty, Input, message } from 'antd'
+import { DesktopOutlined, ReloadOutlined, PlusOutlined } from '@ant-design/icons'
 import { useDeviceStore } from '../../store/useDeviceStore'
-import { getDeviceList, onDeviceOnline, onDeviceOffline, type DeviceInfo } from '../../services/tauriApi'
+import { getDeviceList, onDeviceOnline, onDeviceOffline, discoverDeviceByIp, type DeviceInfo } from '../../services/tauriApi'
 import type { UnlistenFn } from '@tauri-apps/api/event'
 
 interface DeviceListProps {
@@ -27,6 +27,8 @@ const getOsLabel = (os: string) => {
 
 export default function DeviceList({ selectedDeviceId, onSelectDevice }: DeviceListProps) {
   const { devices, isLoading, setDevices, addDevice, removeDevice, setLoading } = useDeviceStore()
+  const [inputIp, setInputIp] = useState('')
+  const [isDiscovering, setIsDiscovering] = useState(false)
 
   // Load devices on mount
   const loadDevices = useCallback(async () => {
@@ -40,6 +42,29 @@ export default function DeviceList({ selectedDeviceId, onSelectDevice }: DeviceL
       setLoading(false)
     }
   }, [setDevices, setLoading])
+
+  // Discover device by IP
+  const handleDiscoverByIp = async () => {
+    if (!inputIp.trim()) {
+      message.warning('请输入 IP 地址')
+      return
+    }
+
+    setIsDiscovering(true)
+    try {
+      const device = await discoverDeviceByIp(inputIp.trim())
+      if (device) {
+        message.success(`发现设备：${device.device_name}`)
+      } else {
+        message.warning('未发现设备，请检查 IP 地址是否正确')
+      }
+    } catch (error) {
+      console.error('Failed to discover device:', error)
+      message.error('发现设备失败')
+    } finally {
+      setIsDiscovering(false)
+    }
+  }
 
   useEffect(() => {
     loadDevices()
@@ -86,6 +111,25 @@ export default function DeviceList({ selectedDeviceId, onSelectDevice }: DeviceL
           刷新
         </Button>
       </div>
+
+      {/* IP 输入框 */}
+      <Space.Compact style={{ width: '100%', marginBottom: 16 }}>
+        <Input
+          placeholder="输入 IP 地址发现设备"
+          value={inputIp}
+          onChange={(e) => setInputIp(e.target.value)}
+          onPressEnter={handleDiscoverByIp}
+          disabled={isDiscovering}
+        />
+        <Button
+          type="primary"
+          icon={<PlusOutlined />}
+          loading={isDiscovering}
+          onClick={handleDiscoverByIp}
+        >
+          发现
+        </Button>
+      </Space.Compact>
 
       {devices.length === 0 ? (
         <Empty
