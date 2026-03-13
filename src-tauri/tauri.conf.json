@@ -19,7 +19,8 @@
         "fullscreen": false,
         "minWidth": 800,
         "minHeight": 600,
-        "dragDropEnabled": true
+        "transparent": true,
+        "decorations": true
       }
     ],
     "security": {
@@ -31,7 +32,8 @@
     "dialog": {},
     "shell": {},
     "fs": {
-      "requireLiteralLeadingDot": false
+      "all": true,
+      "scope": ["**"]
     }
   },
   "bundle": {

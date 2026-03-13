@@ -1,8 +1,8 @@
 import { useEffect, useCallback, useState } from 'react'
-import { List, Avatar, Badge, Button, Space, Empty, Input, message } from 'antd'
+import { List, Avatar, Badge, Button, Space, Empty, Input, message, Tag } from 'antd'
 import { DesktopOutlined, ReloadOutlined, PlusOutlined } from '@ant-design/icons'
 import { useDeviceStore } from '../../store/useDeviceStore'
-import { getDeviceList, onDeviceOnline, onDeviceOffline, discoverDeviceByIp, type DeviceInfo } from '../../services/tauriApi'
+import { getKnownDevices, onDeviceOnline, onDeviceOffline, discoverDeviceByIp, type DeviceInfo } from '../../services/tauriApi'
 import type { UnlistenFn } from '@tauri-apps/api/event'
 
 interface DeviceListProps {
@@ -26,22 +26,22 @@ const getOsLabel = (os: string) => {
 }
 
 export default function DeviceList({ selectedDeviceId, onSelectDevice }: DeviceListProps) {
-  const { devices, isLoading, setDevices, addDevice, removeDevice, setLoading } = useDeviceStore()
+  const { devices, isLoading, loadKnownDevices, setDeviceOnline, setDeviceOffline, setLoading } = useDeviceStore()
   const [inputIp, setInputIp] = useState('')
   const [isDiscovering, setIsDiscovering] = useState(false)
 
-  // Load devices on mount
+  // Load known devices on mount (includes offline devices)
   const loadDevices = useCallback(async () => {
     setLoading(true)
     try {
-      const deviceList = await getDeviceList()
-      setDevices(deviceList)
+      const knownDevices = await getKnownDevices()
+      loadKnownDevices(knownDevices)
     } catch (error) {
-      console.error('Failed to load devices:', error)
+      console.error('Failed to load known devices:', error)
     } finally {
       setLoading(false)
     }
-  }, [setDevices, setLoading])
+  }, [loadKnownDevices, setLoading])
 
   // Discover device by IP
   const handleDiscoverByIp = async () => {
@@ -75,11 +75,11 @@ export default function DeviceList({ selectedDeviceId, onSelectDevice }: DeviceL
 
     const setupListeners = async () => {
       unlistenOnline = await onDeviceOnline((device: DeviceInfo) => {
-        addDevice(device)
+        setDeviceOnline(device)
       })
 
       unlistenOffline = await onDeviceOffline((deviceId: string) => {
-        removeDevice(deviceId)
+        setDeviceOffline(deviceId)
       })
     }
 
@@ -93,7 +93,7 @@ export default function DeviceList({ selectedDeviceId, onSelectDevice }: DeviceL
       unlistenOnline?.()
       unlistenOffline?.()
     }
-  }, [loadDevices, addDevice, removeDevice])
+  }, [loadDevices, setDeviceOnline, setDeviceOffline])
 
   return (
     <div>
@@ -134,7 +134,7 @@ export default function DeviceList({ selectedDeviceId, onSelectDevice }: DeviceL
       {devices.length === 0 ? (
         <Empty
           image={Empty.PRESENTED_IMAGE_SIMPLE}
-          description="暂无在线设备"
+          description="暂无设备记录"
           style={{ marginTop: 40 }}
         />
       ) : (
@@ -151,25 +151,37 @@ export default function DeviceList({ selectedDeviceId, onSelectDevice }: DeviceL
                 backgroundColor: selectedDeviceId === device.device_id ? '#e6f7ff' : 'transparent',
                 border: selectedDeviceId === device.device_id ? '1px solid #91d5ff' : '1px solid transparent',
                 transition: 'all 0.2s',
+                opacity: device.is_online ? 1 : 0.5,
               }}
-              onClick={() => onSelectDevice(device.device_id)}
+              onClick={() => device.is_online && onSelectDevice(device.device_id)}
             >
               <List.Item.Meta
                 avatar={
-                  <Badge status="success">
+                  <Badge status={device.is_online ? 'success' : 'default'}>
                     <Avatar icon={getOsIcon(device.os)} />
                   </Badge>
                 }
                 title={
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <span style={{ fontWeight: 500 }}>{device.device_name}</span>
-                    <Badge status="success" text="在线" style={{ fontSize: 12 }} />
+                    <span style={{ fontWeight: 500, color: device.is_online ? undefined : '#999' }}>
+                      {device.device_name}
+                    </span>
+                    {device.is_online ? (
+                      <Badge status="success" text="在线" style={{ fontSize: 12 }} />
+                    ) : (
+                      <Tag color="default" style={{ fontSize: 12 }}>离线</Tag>
+                    )}
                   </div>
                 }
                 description={
                   <Space direction="vertical" size={0} style={{ fontSize: 12 }}>
                     <span>{device.ip_address}</span>
                     <span style={{ color: '#999' }}>{getOsLabel(device.os)}</span>
+                    {!device.is_online && device.last_connected && (
+                      <span style={{ color: '#bbb' }}>
+                        最后连接：{new Date(device.last_connected * 1000).toLocaleString('zh-CN')}
+                      </span>
+                    )}
                   </Space>
                 }
               />

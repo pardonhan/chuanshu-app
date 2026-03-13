@@ -40,6 +40,11 @@ pub fn run() {
             discover_device_by_ip,
             get_transfer_history,
             clear_transfer_history,
+            get_known_devices,
+            delete_known_device,
+            get_system_info,
+            set_auto_launch,
+            get_auto_launch,
         ])
         .setup(move |app| {
             if cfg!(debug_assertions) {

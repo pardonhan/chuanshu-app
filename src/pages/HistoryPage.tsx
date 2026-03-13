@@ -1,9 +1,7 @@
-import { Card, Table, Button, Space, Typography, Empty, message } from 'antd'
+import { Card, Table, Button, Space, message } from 'antd'
 import { FolderOutlined, DeleteOutlined, RedoOutlined } from '@ant-design/icons'
 import { useEffect, useState } from 'react'
 import { getTransferHistory, clearTransferHistory, type TransferHistoryEntry } from '../services/tauriApi'
-
-const { Text } = Typography
 
 interface TableItem {
   key: string
@@ -107,7 +105,7 @@ const columns = [
     title: '操作',
     key: 'action',
     width: 150,
-    render: (_: unknown, record: TableItem) => (
+    render: () => (
       <Space size={4}>
         <Button type="text" icon={<FolderOutlined />} title="打开位置" />
         <Button type="text" icon={<RedoOutlined />} title="重新发送" />

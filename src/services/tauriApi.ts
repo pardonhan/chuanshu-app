@@ -11,6 +11,22 @@ export interface DeviceInfo {
   protocol_version: string
   capabilities: string[]
   last_seen: number
+  is_online?: boolean  // Optional: for known devices that may be offline
+}
+
+// Known device type (includes offline devices)
+export interface KnownDevice {
+  device_id: string
+  device_name: string
+  os: string
+  ip_address: string
+  quic_port: number
+  protocol_version: string
+  capabilities: string  // JSON array string
+  last_seen: number
+  last_connected: number | null
+  is_online: boolean
+  created_at: number
 }
 
 // Transfer types
@@ -105,6 +121,35 @@ export async function getTransferHistory(query: TransferHistoryQuery): Promise<T
 
 export async function clearTransferHistory(): Promise<void> {
   return invoke('clear_transfer_history')
+}
+
+// Known devices API
+export async function getKnownDevices(): Promise<KnownDevice[]> {
+  return invoke('get_known_devices')
+}
+
+export async function deleteKnownDevice(deviceId: string): Promise<void> {
+  return invoke('delete_known_device', { deviceId })
+}
+
+// System info API
+export interface SystemInfo {
+  os: string
+  os_version: string
+  arch: string
+  default_download_path: string
+}
+
+export async function getSystemInfo(): Promise<SystemInfo> {
+  return invoke('get_system_info')
+}
+
+export async function setAutoLaunch(enabled: boolean): Promise<void> {
+  return invoke('set_auto_launch', { enabled })
+}
+
+export async function getAutoLaunch(): Promise<boolean> {
+  return invoke('get_auto_launch')
 }
 
 // Event listeners

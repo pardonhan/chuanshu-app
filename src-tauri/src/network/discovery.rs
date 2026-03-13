@@ -10,6 +10,7 @@ use uuid::Uuid;
 use crate::core::{AppResult, AppError, AppState, DISCOVERY_HEARTBEAT_INTERVAL, DISCOVERY_PORT, DISCOVERY_TIMEOUT};
 use crate::network::device::{Capability, DeviceInfo, OperatingSystem};
 use crate::network::protocol::DiscoveryPacket;
+use crate::storage::get_storage;
 
 /// Event name for device list updates
 const DEVICE_ONLINE_EVENT: &str = "device-online";
@@ -280,6 +281,11 @@ async fn handle_discovery_packet(
 
             app_state.devices.insert(packet.device_id, device_info.clone());
 
+            // Save to known devices
+            if let Some(storage) = get_storage() {
+                let _ = storage.save_known_device(&device_info);
+            }
+
             if is_new {
                 log::info!("Device came online: {} ({})", device_info.device_name, device_info.ip_address);
                 let _ = app_handle.emit(DEVICE_ONLINE_EVENT, &device_info);
@@ -312,15 +318,26 @@ async fn handle_discovery_packet(
 
             app_state.devices.insert(packet.device_id, device_info.clone());
 
+            // Save to known devices
+            if let Some(storage) = get_storage() {
+                let _ = storage.save_known_device(&device_info);
+            }
+
             if is_new {
                 log::info!("Device discovered: {} ({})", device_info.device_name, device_info.ip_address);
                 let _ = app_handle.emit(DEVICE_ONLINE_EVENT, &device_info);
             }
         }
         crate::network::protocol::DiscoveryMessageType::Goodbye => {
-            // Remove device
+            // Remove device from online list
             if let Some((id, device)) = app_state.devices.remove(&packet.device_id) {
                 log::info!("Device went offline: {} ({})", device.device_name, device.ip_address);
+
+                // Mark as offline in database (but keep the record)
+                if let Some(storage) = get_storage() {
+                    let _ = storage.mark_device_offline(id);
+                }
+
                 let _ = app_handle.emit(DEVICE_OFFLINE_EVENT, &id);
             }
         }
@@ -347,6 +364,12 @@ async fn cleanup_offline_devices(app_state: &Arc<AppState>, app_handle: &AppHand
     for id in to_remove {
         if let Some((id, device)) = app_state.devices.remove(&id) {
             log::info!("Device timed out: {} ({})", device.device_name, device.ip_address);
+
+            // Mark as offline in database (but keep the record)
+            if let Some(storage) = get_storage() {
+                let _ = storage.mark_device_offline(id);
+            }
+
             let _ = app_handle.emit(DEVICE_OFFLINE_EVENT, &id);
         }
     }
@@ -445,6 +468,13 @@ pub async fn discover_device_by_ip(
 
                     // Add to device list
                     state.devices.insert(packet.device_id, device_info.clone());
+
+                    // Save to known devices
+                    if let Some(storage) = get_storage() {
+                        let _ = storage.save_known_device(&device_info);
+                        let _ = storage.update_last_connected(packet.device_id);
+                    }
+
                     let _ = app_handle.emit(DEVICE_ONLINE_EVENT, &device_info);
 
                     log::info!("Device discovered at {}: {} ({})", ip, device_info.device_name, device_info.device_id);

@@ -6,7 +6,8 @@ use serde::Serialize;
 use crate::core::AppResult;
 use crate::ipc::Settings;
 use crate::transfer::resume::ResumeInfo;
-use crate::network::protocol::FileMetadata;
+
+pub use crate::network::device::KnownDevice;
 
 /// Storage manager for SQLite database operations
 pub struct Storage {
@@ -78,6 +79,24 @@ impl Storage {
             [],
         )?;
 
+        // Known devices table (for remembering connected devices)
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS known_devices (
+                device_id TEXT PRIMARY KEY,
+                device_name TEXT NOT NULL,
+                os TEXT NOT NULL,
+                ip_address TEXT NOT NULL,
+                quic_port INTEGER NOT NULL,
+                protocol_version TEXT,
+                capabilities TEXT,
+                last_seen INTEGER DEFAULT (strftime('%s', 'now')),
+                last_connected INTEGER,
+                is_online INTEGER DEFAULT 0,
+                created_at INTEGER DEFAULT (strftime('%s', 'now'))
+            )",
+            [],
+        )?;
+
         // Create indexes
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_history_status ON transfer_history(status)",
@@ -89,6 +108,10 @@ impl Storage {
         )?;
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_resume_updated ON resume_info(updated_at)",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_known_devices_last_connected ON known_devices(last_connected DESC)",
             [],
         )?;
 
@@ -390,6 +413,132 @@ impl Storage {
         )?;
 
         Ok(affected as u64)
+    }
+
+    // ==================== Known Devices ====================
+
+    /// Save or update a known device
+    pub fn save_known_device(&self, device: &crate::network::device::DeviceInfo) -> AppResult<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        let capabilities: Vec<String> = device.capabilities.iter().map(|c| {
+            match c {
+                crate::network::device::Capability::FolderTransfer => "FolderTransfer".to_string(),
+                crate::network::device::Capability::ResumeTransfer => "ResumeTransfer".to_string(),
+                crate::network::device::Capability::MultiDeviceSend => "MultiDeviceSend".to_string(),
+                crate::network::device::Capability::P2PTransfer => "P2PTransfer".to_string(),
+            }
+        }).collect();
+        let capabilities_json = serde_json::to_string(&capabilities).unwrap_or_default();
+
+        let os_str = match &device.os {
+            crate::network::device::OperatingSystem::Windows => "Windows".to_string(),
+            crate::network::device::OperatingSystem::MacOS => "MacOS".to_string(),
+            crate::network::device::OperatingSystem::Linux => "Linux".to_string(),
+            crate::network::device::OperatingSystem::Unknown => "Unknown".to_string(),
+        };
+
+        self.conn.execute(
+            "INSERT INTO known_devices
+             (device_id, device_name, os, ip_address, quic_port, protocol_version,
+              capabilities, last_seen, is_online)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1)
+             ON CONFLICT(device_id) DO UPDATE SET
+             device_name = excluded.device_name,
+             os = excluded.os,
+             ip_address = excluded.ip_address,
+             quic_port = excluded.quic_port,
+             protocol_version = excluded.protocol_version,
+             capabilities = excluded.capabilities,
+             last_seen = excluded.last_seen,
+             is_online = 1",
+            params![
+                device.device_id.to_string(),
+                device.device_name,
+                os_str,
+                device.ip_address.to_string(),
+                device.quic_port as i64,
+                device.protocol_version,
+                capabilities_json,
+                now,
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    /// Get all known devices
+    pub fn get_known_devices(&self) -> AppResult<Vec<KnownDevice>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT device_id, device_name, os, ip_address, quic_port,
+                    protocol_version, capabilities, last_seen, last_connected,
+                    is_online, created_at
+             FROM known_devices
+             ORDER BY last_connected DESC, last_seen DESC"
+        )?;
+
+        let devices = stmt.query_map([], |row| {
+            Ok(KnownDevice {
+                device_id: row.get(0)?,
+                device_name: row.get(1)?,
+                os: row.get(2)?,
+                ip_address: row.get(3)?,
+                quic_port: row.get(4)?,
+                protocol_version: row.get(5)?,
+                capabilities: row.get(6)?,
+                last_seen: row.get(7)?,
+                last_connected: row.get(8)?,
+                is_online: row.get::<_, i64>(9)? != 0,
+                created_at: row.get(10)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(devices)
+    }
+
+    /// Update device online status
+    pub fn update_device_online_status(&self, device_id: Uuid, is_online: bool) -> AppResult<()> {
+        self.conn.execute(
+            "UPDATE known_devices SET is_online = ?1 WHERE device_id = ?2",
+            params![if is_online { 1 } else { 0 }, device_id.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// Update last connected time
+    pub fn update_last_connected(&self, device_id: Uuid) -> AppResult<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        self.conn.execute(
+            "UPDATE known_devices SET last_connected = ?1 WHERE device_id = ?2",
+            params![now, device_id.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// Mark device as offline
+    pub fn mark_device_offline(&self, device_id: Uuid) -> AppResult<()> {
+        self.conn.execute(
+            "UPDATE known_devices SET is_online = 0 WHERE device_id = ?1",
+            params![device_id.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// Delete a known device
+    pub fn delete_known_device(&self, device_id: Uuid) -> AppResult<()> {
+        self.conn.execute(
+            "DELETE FROM known_devices WHERE device_id = ?1",
+            params![device_id.to_string()],
+        )?;
+        Ok(())
     }
 }
 
