@@ -32,8 +32,7 @@
     "dialog": {},
     "shell": {},
     "fs": {
-      "all": true,
-      "scope": ["**"]
+      "requireLiteralLeadingDot": false
     }
   },
   "bundle": {
