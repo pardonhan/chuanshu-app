@@ -38,7 +38,17 @@ function App() {
       })
     }
     mediaQuery.addEventListener('change', handleChange)
-    return () => mediaQuery.removeEventListener('change', handleChange)
+
+    // Listen for theme change event from SettingsPage
+    const handleThemeChange = (event: CustomEvent) => {
+      applyTheme(event.detail.theme)
+    }
+    window.addEventListener('theme-change', handleThemeChange as EventListener)
+
+    return () => {
+      mediaQuery.removeEventListener('change', handleChange)
+      window.removeEventListener('theme-change', handleThemeChange as EventListener)
+    }
   }, [])
 
   const applyTheme = (themeSetting: string) => {

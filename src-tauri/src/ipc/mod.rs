@@ -1,6 +1,6 @@
 use serde::{Serialize, Deserialize};
 use std::sync::Arc;
-use tauri::{Emitter, State};
+use tauri::{Manager, State, Emitter};
 use tokio::runtime::Handle;
 use uuid::Uuid;
 use crate::core::*;
@@ -136,7 +136,6 @@ pub async fn set_auto_launch(enabled: bool, app_handle: tauri::AppHandle) -> App
 
     #[cfg(target_os = "macos")]
     {
-        use std::process::Command;
         let current_exe = std::env::current_exe()?;
         let exe_path = current_exe.to_string_lossy();
         let bundle_id = "com.chuanshu.app";
@@ -360,12 +359,126 @@ pub async fn delete_known_device(device_id: String) -> AppResult<()> {
     Ok(())
 }
 
+/// Open file location in file manager
+#[tauri::command]
+pub async fn open_file_location(file_path: String, _app_handle: tauri::AppHandle) -> AppResult<()> {
+    log::info!("Opening file location: {}", file_path);
+
+    // Get the parent directory
+    let path = std::path::Path::new(&file_path);
+    let parent = path.parent()
+        .ok_or_else(|| crate::core::AppError::Other("Invalid file path".to_string()))?;
+
+    // Open the parent directory using OS-specific command
+    let parent_str = parent.to_string_lossy().to_string();
+
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open").arg(&parent_str).spawn();
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let _ = std::process::Command::new("explorer").arg(&parent_str).spawn();
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let _ = std::process::Command::new("xdg-open").arg(&parent_str).spawn();
+    }
+
+    Ok(())
+}
+
+/// Resend files to a device (from history)
+#[tauri::command]
+pub async fn resend_files(
+    device_ids: Vec<String>,
+    file_paths: Vec<String>,
+    state: State<'_, Arc<AppState>>,
+    rt_handle: State<'_, Handle>,
+) -> AppResult<Vec<String>> {
+    use crate::network::protocol::FileMetadata;
+
+    log::info!("Resending files to devices {:?}: {:?}", device_ids, file_paths);
+
+    // Parse device IDs
+    let device_uuids = device_ids.iter()
+        .map(|id| Uuid::parse_str(id)
+            .map_err(|e| crate::core::AppError::Other(format!("Invalid device ID {}: {}", id, e))))
+        .collect::<AppResult<Vec<_>>>()?;
+
+    // Create file metadata for each file
+    let mut files = Vec::new();
+
+    for file_path in &file_paths {
+        let metadata = std::fs::metadata(file_path)
+            .map_err(|e| crate::core::AppError::Other(format!("Cannot read file {}: {}", file_path, e)))?;
+
+        let file_name = std::path::Path::new(file_path)
+            .file_name()
+            .ok_or_else(|| crate::core::AppError::Other("Invalid file path".to_string()))?
+            .to_string_lossy()
+            .to_string();
+
+        let file_id = files.len() as u64;
+
+        files.push(FileMetadata {
+            file_id,
+            relative_path: String::new(),
+            file_name: file_name.clone(),
+            file_size: metadata.len(),
+            modified_time: metadata.modified()
+                .map(|t| t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs())
+                .unwrap_or(0),
+            checksum: None,
+            is_directory: false,
+            source_path: file_path.clone(),
+        });
+    }
+
+    // Send files using the existing send mechanism
+    let task_ids = crate::transfer::send_files(
+        SendFilesRequest {
+            device_ids: device_uuids,
+            file_paths: file_paths.clone(),
+        },
+        state.inner().clone(),
+        rt_handle.inner().clone(),
+    ).await?;
+
+    Ok(task_ids.iter().map(|u| u.to_string()).collect())
+}
+
 /// Event names for frontend communication
 pub const DEVICE_ONLINE_EVENT: &str = "device-online";
 pub const DEVICE_OFFLINE_EVENT: &str = "device-offline";
 pub const TRANSFER_PROGRESS_EVENT: &str = "transfer-progress";
 pub const TRANSFER_COMPLETED_EVENT: &str = "transfer-completed";
 pub const TRANSFER_FAILED_EVENT: &str = "transfer-failed";
+
+/// Send system notification
+pub fn send_notification(app_handle: &tauri::AppHandle, title: &str, body: &str) {
+    // Check if notifications are enabled in settings
+    if let Some(storage) = crate::storage::get_storage() {
+        if let Ok(Some(settings)) = storage.load_settings() {
+            if !settings.enable_notification {
+                log::debug!("Notification disabled: {} - {}", title, body);
+                return;
+            }
+        }
+    }
+
+    use tauri_plugin_notification::NotificationExt;
+
+    log::info!("Sending notification: {} - {}", title, body);
+
+    let _ = app_handle.notification()
+        .builder()
+        .title(title)
+        .body(body)
+        .show();
+}
 
 /// Emit device online event
 pub fn emit_device_online(handle: &tauri::AppHandle, device: &DeviceInfo) {
@@ -382,15 +495,21 @@ pub fn emit_transfer_progress(handle: &tauri::AppHandle, task: &TransferTaskInfo
     let _ = handle.emit(TRANSFER_PROGRESS_EVENT, task);
 }
 
-/// Emit transfer completed event
-pub fn emit_transfer_completed(handle: &tauri::AppHandle, task_id: Uuid) {
+/// Emit transfer completed event and send notification
+pub fn emit_transfer_completed(handle: &tauri::AppHandle, task_id: Uuid, device_name: &str) {
     let _ = handle.emit(TRANSFER_COMPLETED_EVENT, task_id);
+
+    // Send system notification
+    send_notification(handle, "传输完成", &format!("文件已从 {} 接收完成", device_name));
 }
 
-/// Emit transfer failed event
+/// Emit transfer failed event and send notification
 pub fn emit_transfer_failed(handle: &tauri::AppHandle, task_id: Uuid, error: String) {
     let _ = handle.emit(TRANSFER_FAILED_EVENT, serde_json::json!({
         "task_id": task_id,
         "error": error
     }));
+
+    // Send system notification
+    send_notification(handle, "传输失败", &format!("文件传输失败：{}", error));
 }

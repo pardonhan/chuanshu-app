@@ -6,6 +6,34 @@ import { open } from '@tauri-apps/plugin-dialog'
 
 const { Option } = Select
 
+// Apply theme based on setting and dispatch custom event for App.tsx to listen
+const applyTheme = (theme: 'auto' | 'light' | 'dark') => {
+  const root = document.documentElement
+  if (theme === 'light') {
+    root.removeAttribute('data-theme')
+    root.style.colorScheme = 'light'
+  } else if (theme === 'dark') {
+    root.setAttribute('data-theme', 'dark')
+    root.style.colorScheme = 'dark'
+  } else {
+    // Auto: follow system preference
+    root.removeAttribute('data-theme')
+    root.style.colorScheme = ''
+  }
+  localStorage.setItem('theme', theme)
+
+  // Dispatch custom event for App.tsx to listen and update its state
+  window.dispatchEvent(new CustomEvent('theme-change', { detail: { theme } }))
+}
+
+// Slider marks with compact labels
+const speedMarks = {
+  0: '不限',
+  10: '10MB',
+  50: '50MB',
+  100: '100MB',
+}
+
 export default function SettingsPage() {
   const [form] = Form.useForm()
   const [isLoading, setIsLoading] = useState(false)
@@ -42,6 +70,8 @@ export default function SettingsPage() {
     try {
       const settings = await getSettings()
       form.setFieldsValue(settings)
+      // Apply theme setting
+      applyTheme(settings.theme as 'auto' | 'light' | 'dark')
     } catch (error) {
       console.error('Failed to load settings:', error)
       message.error('加载设置失败')
@@ -50,10 +80,20 @@ export default function SettingsPage() {
     }
   }
 
+  // Apply theme on mount and when form values change
+  const themeValue = Form.useWatch('theme', form)
+  useEffect(() => {
+    if (themeValue) {
+      applyTheme(themeValue as 'auto' | 'light' | 'dark')
+    }
+  }, [themeValue])
+
   const onFinish = async (values: Settings) => {
     setIsSaving(true)
     try {
       await saveSettings(values)
+      // Apply theme after saving
+      applyTheme(values.theme as 'auto' | 'light' | 'dark')
       message.success('设置已保存')
     } catch (error) {
       console.error('Failed to save settings:', error)
@@ -130,7 +170,13 @@ export default function SettingsPage() {
           rules={[{ required: true, message: '请输入设备名称' }]}
           extra={<span style={{ color: '#999', fontSize: '12px' }}>设备名称将在局域网中显示，用于标识本设备</span>}
         >
-          <Input placeholder="输入设备在局域网中显示的名称" maxLength={50} showCount />
+          <Input
+            placeholder="输入设备在局域网中显示的名称"
+            maxLength={50}
+            showCount
+            value={Form.useWatch('device_name', form)}
+            onChange={(e) => form.setFieldValue('device_name', e.target.value)}
+          />
         </Form.Item>
 
         <Form.Item
@@ -140,7 +186,12 @@ export default function SettingsPage() {
           extra={<span style={{ color: '#999', fontSize: '12px' }}>系统推荐路径：{systemInfo?.default_download_path || '检测中...'}</span>}
         >
           <Input.Group compact>
-            <Input style={{ width: 'calc(100% - 100px)' }} placeholder="文件接收后的保存路径" />
+            <Input
+              style={{ width: 'calc(100% - 100px)' }}
+              placeholder="文件接收后的保存路径"
+              value={Form.useWatch('download_path', form)}
+              onChange={(e) => form.setFieldValue('download_path', e.target.value)}
+            />
             <Button icon={<FolderOutlined />} onClick={handleSelectDownloadPath}>
               浏览
             </Button>
@@ -175,26 +226,26 @@ export default function SettingsPage() {
         <Form.Item
           label="上传限速"
           name="upload_limit"
-          extra="限制上传速度，避免占用全部带宽"
+          extra="限制上传速度，避免占用全部带宽（单位：MB/s）"
         >
           <Slider
             min={0}
             max={100}
-            marks={{ 0: '不限', 1: '1MB', 5: '5MB', 10: '10MB', 50: '50MB', 100: '100MB' }}
-            step={null}
+            marks={speedMarks}
+            step={1}
           />
         </Form.Item>
 
         <Form.Item
           label="下载限速"
           name="download_limit"
-          extra="限制下载速度，避免占用全部带宽"
+          extra="限制下载速度，避免占用全部带宽（单位：MB/s）"
         >
           <Slider
             min={0}
             max={100}
-            marks={{ 0: '不限', 1: '1MB', 5: '5MB', 10: '10MB', 50: '50MB', 100: '100MB' }}
-            step={null}
+            marks={speedMarks}
+            step={1}
           />
         </Form.Item>
 

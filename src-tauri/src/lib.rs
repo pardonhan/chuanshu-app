@@ -26,6 +26,9 @@ pub fn run() {
     tauri::Builder::default()
         // Plugins
         .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(app_state.clone())
         .manage(rt.handle().clone())
         .invoke_handler(tauri::generate_handler![
@@ -45,6 +48,8 @@ pub fn run() {
             get_system_info,
             set_auto_launch,
             get_auto_launch,
+            open_file_location,
+            resend_files,
         ])
         .setup(move |app| {
             if cfg!(debug_assertions) {
@@ -73,6 +78,9 @@ pub fn run() {
             let handle = app.handle().clone();
             let state = app_state.clone();
             let rt_handle = rt_clone.handle().clone();
+
+            // Set app handle in state for event emission
+            state.set_app_handle(handle.clone());
 
             // Start discovery service
             rt_handle.spawn(async move {
