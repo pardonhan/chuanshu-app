@@ -8,7 +8,7 @@ use tokio::time::interval;
 use uuid::Uuid;
 use quinn::Endpoint;
 
-use crate::core::{AppResult, AppError, AppState, DISCOVERY_HEARTBEAT_INTERVAL, DISCOVERY_PORT, DISCOVERY_TIMEOUT};
+use crate::core::{AppResult, AppError, AppState, DISCOVERY_HEARTBEAT_INTERVAL, DISCOVERY_PORT, DISCOVERY_TIMEOUT, QUIC_IDLE_TIMEOUT};
 use crate::network::device::{Capability, DeviceInfo, OperatingSystem};
 use crate::network::protocol::DiscoveryPacket;
 use crate::network::connection::get_connection_pool;

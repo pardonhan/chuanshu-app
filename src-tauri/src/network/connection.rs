@@ -7,7 +7,7 @@ use quinn::{Connection, Endpoint, SendStream, RecvStream};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-use crate::core::AppResult;
+use crate::core::{AppResult, QUIC_IDLE_TIMEOUT, QUIC_KEEP_ALIVE_INTERVAL};
 use crate::network::protocol::ControlMessage;
 
 /// Connection pool for managing active QUIC connections
@@ -294,10 +294,10 @@ pub fn create_client_config() -> AppResult<quinn::ClientConfig> {
 
     // Transport configuration with keep-alive
     let mut transport = quinn::TransportConfig::default();
-    // Enable keep-alive: send keep-alive every 5 seconds
-    transport.keep_alive_interval(Some(Duration::from_secs(5)));
-    // Idle timeout: 15 seconds (3x keep-alive interval)
-    transport.max_idle_timeout(Some(Duration::from_secs(15).try_into().unwrap()));
+    // Enable keep-alive: send keep-alive every QUIC_KEEP_ALIVE_INTERVAL seconds
+    transport.keep_alive_interval(Some(Duration::from_secs(QUIC_KEEP_ALIVE_INTERVAL)));
+    // Idle timeout: QUIC_IDLE_TIMEOUT seconds (4x keep-alive interval)
+    transport.max_idle_timeout(Some(Duration::from_secs(QUIC_IDLE_TIMEOUT).try_into().unwrap()));
 
     config.transport_config(Arc::new(transport));
 
@@ -321,10 +321,10 @@ pub fn create_server_config(cert: rustls::Certificate, key: rustls::PrivateKey) 
     transport.max_concurrent_uni_streams(100u32.into());
     transport.receive_window(16u32.into());
     transport.send_window(16 * 1024 * 1024);
-    // Enable keep-alive: send keep-alive every 5 seconds
-    transport.keep_alive_interval(Some(Duration::from_secs(5)));
-    // Idle timeout: 15 seconds (3x keep-alive interval)
-    transport.max_idle_timeout(Some(Duration::from_secs(15).try_into().unwrap()));
+    // Enable keep-alive: send keep-alive every QUIC_KEEP_ALIVE_INTERVAL seconds
+    transport.keep_alive_interval(Some(Duration::from_secs(QUIC_KEEP_ALIVE_INTERVAL)));
+    // Idle timeout: QUIC_IDLE_TIMEOUT seconds (4x keep-alive interval)
+    transport.max_idle_timeout(Some(Duration::from_secs(QUIC_IDLE_TIMEOUT).try_into().unwrap()));
 
     config.transport_config(Arc::new(transport));
 

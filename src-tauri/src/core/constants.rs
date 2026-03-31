@@ -2,8 +2,13 @@
 pub const DISCOVERY_PORT: u16 = 45678;
 /// 设备发现心跳间隔（秒）
 pub const DISCOVERY_HEARTBEAT_INTERVAL: u64 = 3;
-/// 设备离线超时时间（秒）
+/// 设备离线超时时间（秒） - 超过此时间未收到心跳视为离线
 pub const DISCOVERY_TIMEOUT: u64 = 30;
+/// QUIC 连接空闲超时时间（秒）- 必须大于 DISCOVERY_TIMEOUT
+/// 设置为 60 秒确保在设备发现超时后连接仍保持，避免误判离线
+pub const QUIC_IDLE_TIMEOUT: u64 = 60;
+/// QUIC 保活间隔（秒）- 应小于空闲超时的 1/3
+pub const QUIC_KEEP_ALIVE_INTERVAL: u64 = 15;
 /// QUIC服务端默认端口
 pub const QUIC_DEFAULT_PORT: u16 = 45679;
 /// 最大并发传输任务数
