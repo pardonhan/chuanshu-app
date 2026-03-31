@@ -5,5 +5,5 @@ pub mod app_state;
 
 pub use error::*;
 pub use constants::*;
-pub use config::*;
+// pub use config::*;  // Only used internally
 pub use app_state::*;

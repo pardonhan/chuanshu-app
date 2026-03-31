@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use dashmap::DashMap;
 use quinn::{Connection, Endpoint, SendStream, RecvStream};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::core::AppResult;
@@ -16,6 +16,8 @@ pub struct ConnectionPool {
     connections: DashMap<Uuid, PeerConnection>,
     /// Pending connection attempts
     pending: DashMap<Uuid, tokio::sync::oneshot::Sender<AppResult<PeerConnection>>>,
+    /// Connection close callbacks
+    close_callbacks: DashMap<Uuid, Box<dyn Fn(Uuid) + Send + Sync>>,
 }
 
 impl ConnectionPool {
@@ -24,6 +26,22 @@ impl ConnectionPool {
         Self {
             connections: DashMap::new(),
             pending: DashMap::new(),
+            close_callbacks: DashMap::new(),
+        }
+    }
+
+    /// Register a callback for when a connection closes
+    pub fn on_connection_close<F>(&self, device_id: Uuid, callback: F)
+    where
+        F: Fn(Uuid) + Send + Sync + 'static,
+    {
+        self.close_callbacks.insert(device_id, Box::new(callback));
+    }
+
+    /// Trigger connection close callback
+    pub fn trigger_close_callback(&self, device_id: Uuid) {
+        if let Some((id, callback)) = self.close_callbacks.remove(&device_id) {
+            callback(id);
         }
     }
 
@@ -36,7 +54,7 @@ impl ConnectionPool {
     ) -> AppResult<PeerConnection> {
         // Check if we already have a connection
         if let Some(conn) = self.connections.get(&device_id) {
-            if conn.is_connected().await {
+            if conn.is_connected() {
                 return Ok(conn.clone());
             }
             // Connection is dead, remove it
@@ -84,6 +102,12 @@ impl ConnectionPool {
         }
         self.connections.clear();
     }
+
+    /// Remove a connection and trigger callback
+    pub fn remove_and_callback(&self, device_id: &Uuid) {
+        self.connections.remove(device_id);
+        self.trigger_close_callback(*device_id);
+    }
 }
 
 impl Default for ConnectionPool {
@@ -113,8 +137,25 @@ impl PeerConnection {
         }
     }
 
+    /// Start connection keep-alive and monitoring
+    pub fn start_monitoring(&self, pool: Arc<ConnectionPool>) {
+        let device_id = self.device_id;
+        let connection = self.connection.clone();
+
+        tokio::spawn(async move {
+            // Wait for connection to close
+            let closed = connection.closed();
+            closed.await;
+
+            log::info!("QUIC connection closed for device {}", device_id);
+
+            // Remove from pool and trigger callback
+            pool.remove_and_callback(&device_id);
+        });
+    }
+
     /// Check if the connection is still active
-    pub async fn is_connected(&self) -> bool {
+    pub fn is_connected(&self) -> bool {
         self.connection.close_reason().is_none()
     }
 
@@ -196,7 +237,7 @@ async fn connect_to_peer(addr: SocketAddr, endpoint: &Endpoint) -> AppResult<Con
 
 /// Generate a self-signed certificate for QUIC
 pub fn generate_self_signed_cert() -> AppResult<(rustls::Certificate, rustls::PrivateKey)> {
-    use rcgen::{Certificate, DistinguishedName, DnType, PKCS_ECDSA_P256_SHA256};
+    use rcgen::{Certificate, DistinguishedName, DnType};
     use std::net::{IpAddr, Ipv4Addr};
 
     let mut params = rcgen::CertificateParams::default();
@@ -227,12 +268,21 @@ pub fn generate_self_signed_cert() -> AppResult<(rustls::Certificate, rustls::Pr
 }
 
 /// Create QUIC client configuration
+///
+/// SECURITY NOTE: This configuration uses a permissive certificate verifier
+/// for LAN environments where PKI infrastructure is not available.
+/// For production use, consider implementing certificate pinning or
+/// a proper PKI infrastructure.
 pub fn create_client_config() -> AppResult<quinn::ClientConfig> {
-    // Create client config that accepts self-signed certificates
-    // For LAN use, we configure rustls to be permissive
+    use std::sync::Arc;
+
+    // Create a permissive client config that accepts self-signed certificates
+    // WARNING: This makes the connection vulnerable to MITM attacks on untrusted networks
+    // This is acceptable for trusted LAN environments but users should be aware of the risk
+    log::warn!("SECURITY: QUIC configured to accept self-signed certificates - only use on trusted networks");
+
     let roots = rustls::RootCertStore::empty();
 
-    // Create a permissive client config
     let crypto = std::sync::Arc::new(
         rustls::ClientConfig::builder()
             .with_safe_defaults()
@@ -240,7 +290,18 @@ pub fn create_client_config() -> AppResult<quinn::ClientConfig> {
             .with_no_client_auth(),
     );
 
-    Ok(quinn::ClientConfig::new(crypto))
+    let mut config = quinn::ClientConfig::new(crypto);
+
+    // Transport configuration with keep-alive
+    let mut transport = quinn::TransportConfig::default();
+    // Enable keep-alive: send keep-alive every 5 seconds
+    transport.keep_alive_interval(Some(Duration::from_secs(5)));
+    // Idle timeout: 15 seconds (3x keep-alive interval)
+    transport.max_idle_timeout(Some(Duration::from_secs(15).try_into().unwrap()));
+
+    config.transport_config(Arc::new(transport));
+
+    Ok(config)
 }
 
 /// Create QUIC server configuration
@@ -254,12 +315,16 @@ pub fn create_server_config(cert: rustls::Certificate, key: rustls::PrivateKey) 
     let crypto = std::sync::Arc::new(crypto);
     let mut config = quinn::ServerConfig::with_crypto(crypto);
 
-    // Transport configuration for high throughput
+    // Transport configuration for high throughput and keep-alive
     let mut transport = quinn::TransportConfig::default();
     transport.max_concurrent_bidi_streams(100u32.into());
     transport.max_concurrent_uni_streams(100u32.into());
     transport.receive_window(16u32.into());
     transport.send_window(16 * 1024 * 1024);
+    // Enable keep-alive: send keep-alive every 5 seconds
+    transport.keep_alive_interval(Some(Duration::from_secs(5)));
+    // Idle timeout: 15 seconds (3x keep-alive interval)
+    transport.max_idle_timeout(Some(Duration::from_secs(15).try_into().unwrap()));
 
     config.transport_config(Arc::new(transport));
 

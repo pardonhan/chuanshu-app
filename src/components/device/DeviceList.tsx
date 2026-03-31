@@ -1,8 +1,8 @@
 import { useEffect, useCallback, useState } from 'react'
 import { List, Avatar, Badge, Button, Space, Empty, Input, message, Tag } from 'antd'
-import { DesktopOutlined, ReloadOutlined, PlusOutlined } from '@ant-design/icons'
+import { DesktopOutlined, ReloadOutlined, PlusOutlined, WifiOutlined, SyncOutlined } from '@ant-design/icons'
 import { useDeviceStore } from '../../store/useDeviceStore'
-import { getKnownDevices, onDeviceOnline, onDeviceOffline, discoverDeviceByIp, type DeviceInfo } from '../../services/tauriApi'
+import { getKnownDevices, onDeviceOnline, onDeviceOffline, discoverDeviceByIp, type DeviceInfo, type DeviceStatus, DEVICE_STATUS_COLORS, DEVICE_STATUS_LABELS } from '../../services/tauriApi'
 import type { UnlistenFn } from '@tauri-apps/api/event'
 
 interface DeviceListProps {
@@ -24,6 +24,12 @@ const getOsLabel = (os: string) => {
     default: return '未知系统'
   }
 }
+
+// 获取状态指示器颜色
+const getStatusColor = (status: DeviceStatus) => DEVICE_STATUS_COLORS[status]
+
+// 获取状态标签
+const getStatusLabel = (status: DeviceStatus) => DEVICE_STATUS_LABELS[status]
 
 export default function DeviceList({ selectedDeviceId, onSelectDevice }: DeviceListProps) {
   const { devices, isLoading, loadKnownDevices, setDeviceOnline, setDeviceOffline, setLoading } = useDeviceStore()
@@ -134,59 +140,81 @@ export default function DeviceList({ selectedDeviceId, onSelectDevice }: DeviceL
       {devices.length === 0 ? (
         <Empty
           image={Empty.PRESENTED_IMAGE_SIMPLE}
-          description="暂无设备记录"
+          description={
+            <div>
+              <p style={{ marginBottom: 8 }}>暂无设备记录</p>
+              <p style={{ fontSize: 12, color: '#999' }}>
+                <SyncOutlined spin /> 正在扫描网络设备...
+              </p>
+            </div>
+          }
           style={{ marginTop: 40 }}
         />
       ) : (
         <List
           dataSource={devices}
           loading={isLoading}
-          renderItem={(device) => (
-            <List.Item
-              key={device.device_id}
-              style={{
-                cursor: 'pointer',
-                borderRadius: 8,
-                padding: 12,
-                backgroundColor: selectedDeviceId === device.device_id ? '#e6f7ff' : 'transparent',
-                border: selectedDeviceId === device.device_id ? '1px solid #91d5ff' : '1px solid transparent',
-                transition: 'all 0.2s',
-                opacity: device.is_online ? 1 : 0.5,
-              }}
-              onClick={() => device.is_online && onSelectDevice(device.device_id)}
-            >
-              <List.Item.Meta
-                avatar={
-                  <Badge status={device.is_online ? 'success' : 'default'}>
-                    <Avatar icon={getOsIcon(device.os)} />
-                  </Badge>
-                }
-                title={
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <span style={{ fontWeight: 500, color: device.is_online ? undefined : '#999' }}>
-                      {device.device_name}
-                    </span>
-                    {device.is_online ? (
-                      <Badge status="success" text="在线" style={{ fontSize: 12 }} />
-                    ) : (
-                      <Tag color="default" style={{ fontSize: 12 }}>离线</Tag>
-                    )}
-                  </div>
-                }
-                description={
-                  <Space direction="vertical" size={0} style={{ fontSize: 12 }}>
-                    <span>{device.ip_address}</span>
-                    <span style={{ color: '#999' }}>{getOsLabel(device.os)}</span>
-                    {!device.is_online && device.last_connected && (
-                      <span style={{ color: '#bbb' }}>
-                        最后连接：{new Date(device.last_connected * 1000).toLocaleString('zh-CN')}
+          renderItem={(device) => {
+            const status = device.status || (device.is_online ? 'online' : 'offline')
+            const statusColor = getStatusColor(status)
+            const statusLabel = getStatusLabel(status)
+
+            return (
+              <List.Item
+                key={device.device_id}
+                style={{
+                  cursor: device.is_online ? 'pointer' : 'default',
+                  borderRadius: 8,
+                  padding: 12,
+                  backgroundColor: selectedDeviceId === device.device_id ? '#e6f7ff' : 'transparent',
+                  border: selectedDeviceId === device.device_id ? '1px solid #91d5ff' : '1px solid transparent',
+                  transition: 'all 0.2s',
+                  opacity: device.is_online ? 1 : 0.6,
+                }}
+                onClick={() => device.is_online && onSelectDevice(device.device_id)}
+              >
+                <List.Item.Meta
+                  avatar={
+                    <Badge
+                      color={statusColor}
+                      style={{ fontSize: 12 }}
+                    >
+                      <Avatar icon={getOsIcon(device.os)} />
+                    </Badge>
+                  }
+                  title={
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span style={{ fontWeight: 500, color: device.is_online ? undefined : '#999' }}>
+                        {device.device_name}
                       </span>
-                    )}
-                  </Space>
-                }
-              />
-            </List.Item>
-          )}
+                      <Tag
+                        color={statusColor}
+                        style={{
+                          fontSize: 12,
+                          border: status === 'offline' ? '1px dashed #d9d9d9' : '1px solid transparent',
+                        }}
+                      >
+                        {status === 'scanning' && <SyncOutlined spin style={{ marginRight: 4 }} />}
+                        {status === 'connecting' && <WifiOutlined style={{ marginRight: 4 }} />}
+                        {statusLabel}
+                      </Tag>
+                    </div>
+                  }
+                  description={
+                    <Space direction="vertical" size={0} style={{ fontSize: 12 }}>
+                      <span>{device.ip_address}</span>
+                      <span style={{ color: '#999' }}>{getOsLabel(device.os)}</span>
+                      {!device.is_online && device.last_connected && (
+                        <span style={{ color: '#bbb' }}>
+                          最后连接：{new Date(device.last_connected * 1000).toLocaleString('zh-CN')}
+                        </span>
+                      )}
+                    </Space>
+                  }
+                />
+              </List.Item>
+            )
+          }}
         />
       )}
     </div>

@@ -2,21 +2,24 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::io::AsyncReadExt;
 use tokio::runtime::Handle;
 use tokio::sync::Mutex;
 use tokio::time::interval;
 use uuid::Uuid;
 use walkdir::WalkDir;
 
-use crate::core::{AppResult, AppState, MAX_CONCURRENT_TRANSFERS};
+use crate::core::{AppResult, AppState, DEFAULT_CHUNK_SIZE};
 use crate::ipc::SendFilesRequest;
-use crate::network::device::DeviceInfo;
-use crate::network::protocol::{FileMetadata, TransferRequest};
+use crate::network::protocol::{
+    FileMetadata, TransferRequest, DataPacket, ChunkMetadata,
+};
 use crate::network::quic_client::{request_transfer, init_quic_client};
 use crate::transfer::{
     TransferTask, TransferTaskInfo, TransferType, TransferStatus,
-    file_chunk::{FileChunker, calculate_file_hash},
-    resume::ResumeInfo,
+    file_chunk::{calculate_crc32, calculate_file_hash},
+    rate_limiter::SharedRateLimiter,
+    resume::{ResumeInfo, ResumeManager},
 };
 
 /// Transfer manager for handling file transfers
@@ -192,6 +195,7 @@ impl TransferManager {
             modified_time,
             checksum,
             is_directory: false,
+            source_path: path.to_string_lossy().to_string(),
         })
     }
 
@@ -235,7 +239,19 @@ impl TransferManager {
                 task.set_status(TransferStatus::Transferring);
                 log::info!("Transfer {} resumed", task_id);
 
-                // TODO: Re-initiate the transfer with resume info
+                // Load resume info and re-initiate transfer
+                if let Some(storage) = crate::storage::get_storage() {
+                    let resume_manager = ResumeManager::new(&*storage);
+                    if let Ok(Some(resume_info)) = resume_manager.load_resume(task_id) {
+                        let app_state = self.app_state.clone();
+                        tokio::spawn(async move {
+                            match resume_transfer_task(task_id, resume_info, app_state).await {
+                                Ok(_) => log::info!("Resumed transfer {} completed", task_id),
+                                Err(e) => log::error!("Resumed transfer {} failed: {}", task_id, e),
+                            }
+                        });
+                    }
+                }
             }
         }
 
@@ -296,6 +312,15 @@ async fn initiate_transfer(
     // Initialize QUIC client if needed
     init_quic_client().await.ok();
 
+    // Get upload limit from settings
+    let upload_limit = {
+        let storage = crate::storage::get_storage();
+        storage
+            .and_then(|s| s.load_settings().ok().flatten())
+            .map(|s| s.upload_limit)
+            .unwrap_or(0)
+    };
+
     // Send transfer request
     let response = request_transfer(peer_addr, peer_device_id, request.clone(), app_state.clone()).await?;
 
@@ -308,18 +333,282 @@ async fn initiate_transfer(
     if let Some(entry) = app_state.transfer_tasks.get(&request.task_id) {
         let mut task = entry.lock().await;
         task.set_status(TransferStatus::Transferring);
+        task.files = request.files.clone();
     }
 
     log::info!("Transfer {} accepted by peer", request.task_id);
 
-    // TODO: Start actual file transfer
-    // This would involve:
-    // 1. Opening data streams
-    // 2. Sending file chunks
-    // 3. Progress tracking
-    // 4. Handling pause/resume/cancel
+    // Start actual file transfer
+    let task_id = request.task_id;
+    let files = request.files.clone();
+    let total_size = request.total_size;
+    let file_count = request.file_count;
+    let sender_id = request.sender_id;
+    let sender_name = request.sender_name.clone();
+    let app_state_clone = app_state.clone();
+
+    tokio::spawn(async move {
+        match send_files_data(
+            peer_addr,
+            task_id,
+            files,
+            total_size,
+            file_count,
+            sender_id,
+            &sender_name,
+            app_state_clone,
+            upload_limit,
+        ).await {
+            Ok(_) => {
+                log::info!("Transfer {} completed successfully", task_id);
+                if let Some(entry) = app_state.transfer_tasks.get(&task_id) {
+                    let mut task = entry.lock().await;
+                    task.set_status(TransferStatus::Completed);
+
+                    // Save to transfer history
+                    if let Some(storage) = crate::storage::get_storage() {
+                        let file_names = task.files
+                            .iter()
+                            .map(|f| f.file_name.clone())
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        let _ = storage.add_transfer_history(
+                            task_id,
+                            task.peer_device_id,
+                            &task.peer_device_name,
+                            "send",
+                            "completed",
+                            task.total_size,
+                            task.file_count,
+                            Some(&file_names),
+                        );
+                    }
+
+                    // Send completion notification
+                    let handle = app_state.get_app_handle();
+                    if let Some(h) = handle {
+                        let _ = crate::ipc::emit_transfer_completed(&h, task_id, &task.peer_device_name);
+                    }
+                }
+            }
+            Err(e) => {
+                log::error!("Transfer {} failed: {}", task_id, e);
+                if let Some(entry) = app_state.transfer_tasks.get(&task_id) {
+                    let mut task = entry.lock().await;
+                    task.set_error(e.to_string());
+
+                    // Save to transfer history
+                    if let Some(storage) = crate::storage::get_storage() {
+                        let file_names = task.files
+                            .iter()
+                            .map(|f| f.file_name.clone())
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        let _ = storage.add_transfer_history(
+                            task_id,
+                            task.peer_device_id,
+                            &task.peer_device_name,
+                            "send",
+                            "failed",
+                            task.total_size,
+                            task.file_count,
+                            Some(&file_names),
+                        );
+                    }
+
+                    // Send failure notification
+                    let handle = app_state.get_app_handle();
+                    if let Some(h) = handle {
+                        let _ = crate::ipc::emit_transfer_failed(&h, task_id, e.to_string());
+                    }
+                }
+            }
+        }
+    });
 
     Ok(())
+}
+
+/// Send actual file data to peer
+async fn send_files_data(
+    peer_addr: SocketAddr,
+    task_id: Uuid,
+    files: Vec<FileMetadata>,
+    _total_size: u64,
+    _file_count: u32,
+    _sender_id: Uuid,
+    _sender_name: &str,
+    app_state: Arc<AppState>,
+    upload_limit: u32,
+) -> AppResult<()> {
+    // Create a temporary endpoint for connection
+    let client_config = crate::network::connection::create_client_config()?;
+    let bind_addr: SocketAddr = "0.0.0.0:0".parse()
+        .map_err(|e| crate::core::AppError::Other(format!("Invalid bind address: {}", e)))?;
+    let mut endpoint = quinn::Endpoint::client(bind_addr)?;
+    endpoint.set_default_client_config(client_config);
+
+    // Connect to peer (use sender_id as temporary device_id)
+    let connecting = endpoint.connect(peer_addr, "chuanshu.local")
+        .map_err(|e| crate::core::AppError::Other(format!("Failed to connect: {}", e)))?;
+    let connection = match tokio::time::timeout(Duration::from_secs(10), connecting).await {
+        Ok(Ok(conn)) => conn,
+        Ok(Err(e)) => return Err(crate::core::AppError::Network(format!("Connection failed: {}", e))),
+        Err(_) => return Err(crate::core::AppError::Other("Connection timeout".to_string())),
+    };
+
+    // Open stream for data transfer
+    let (mut send, mut recv) = connection.open_bi().await
+        .map_err(|e| crate::core::AppError::Network(format!("Failed to open stream: {}", e)))?;
+
+    // Create rate limiter for upload
+    let rate_limiter = SharedRateLimiter::new(upload_limit);
+
+    let mut transferred_size: u64 = 0;
+    let mut last_update_time = std::time::Instant::now();
+    let mut last_transferred = 0u64;
+
+    // Send each file
+    for (file_index, file_meta) in files.iter().enumerate() {
+        // Update current file in task
+        if let Some(entry) = app_state.transfer_tasks.get(&task_id) {
+            let mut task = entry.lock().await;
+            task.set_current_file(&file_meta.file_name, file_index as u32);
+        }
+
+        // Send file header
+        let file_header = FileHeader {
+            task_id,
+            file_id: file_meta.file_id,
+            file_name: file_meta.file_name.clone(),
+            file_size: file_meta.file_size,
+            relative_path: file_meta.relative_path.clone(),
+            checksum: file_meta.checksum.clone(),
+        };
+
+        // Send header with length prefix
+        let header_data = bincode::serialize(&file_header)?;
+        send.write_all(&header_data.len().to_be_bytes()).await
+            .map_err(|e| crate::core::AppError::Network(format!("Failed to write header: {}", e)))?;
+        send.write_all(&header_data).await
+            .map_err(|e| crate::core::AppError::Network(format!("Failed to write header data: {}", e)))?;
+
+        // Read and send file chunks using source_path
+        let file_path = Path::new(&file_meta.source_path);
+        let mut file = tokio::fs::File::open(file_path).await?;
+
+        let chunk_size = DEFAULT_CHUNK_SIZE as u64;
+        let mut offset: u64 = 0;
+        let mut chunk_index: u64 = 0;
+        let total_chunks = ((file_meta.file_size + chunk_size - 1) / chunk_size).max(1);
+
+        loop {
+            // Check if task is paused or canceled
+            if let Some(entry) = app_state.transfer_tasks.get(&task_id) {
+                let task = entry.lock().await;
+                if task.status == TransferStatus::Canceled {
+                    return Err(crate::core::AppError::Other("Transfer canceled".to_string()));
+                }
+                if task.status == TransferStatus::Paused {
+                    // Wait until resumed
+                    drop(task);
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+            }
+
+            // Read chunk
+            let mut buffer = vec![0u8; chunk_size.min(file_meta.file_size - offset) as usize];
+            let n = file.read(&mut buffer).await?;
+            if n == 0 {
+                break;
+            }
+            buffer.truncate(n);
+
+            // Calculate checksum
+            let checksum = calculate_crc32(&buffer);
+
+            // Create chunk metadata
+            let chunk_meta = ChunkMetadata {
+                task_id,
+                file_id: file_meta.file_id,
+                chunk_index,
+                total_chunks,
+                chunk_size: n as u32,
+                offset,
+                checksum,
+            };
+
+            // Create data packet
+            let packet = DataPacket {
+                metadata: chunk_meta,
+                data: buffer,
+            };
+
+            // Send packet
+            let packet_data = bincode::serialize(&packet)?;
+            send.write_all(&packet_data.len().to_be_bytes()).await
+                .map_err(|e| crate::core::AppError::Network(format!("Failed to write packet: {}", e)))?;
+            send.write_all(&packet_data).await
+                .map_err(|e| crate::core::AppError::Network(format!("Failed to write packet data: {}", e)))?;
+
+            // Apply rate limiting after sending data
+            if upload_limit > 0 {
+                rate_limiter.consume_and_wait(packet_data.len() as u64).await;
+            }
+
+            offset += n as u64;
+            chunk_index += 1;
+            transferred_size += n as u64;
+
+            // Emit progress every 100ms
+            let now = std::time::Instant::now();
+            if now.duration_since(last_update_time) >= Duration::from_millis(100) {
+                let elapsed = now.duration_since(last_update_time).as_secs_f64();
+                let speed = if elapsed > 0.0 {
+                    ((transferred_size - last_transferred) as f64 / elapsed) as u64
+                } else {
+                    0
+                };
+
+                // Update task and emit event
+                if let Some(entry) = app_state.transfer_tasks.get(&task_id) {
+                    let mut task = entry.lock().await;
+                    task.update_progress(transferred_size, speed);
+
+                    // Emit event to frontend
+                    let info = TransferTaskInfo::from(&*task);
+                    let _ = app_state.emit_async("transfer-progress", &info).await;
+                }
+
+                last_update_time = now;
+                last_transferred = transferred_size;
+            }
+        }
+    }
+
+    // Send transfer complete marker
+    send.write_all(&0u32.to_be_bytes()).await
+        .map_err(|e| crate::core::AppError::Network(format!("Failed to write complete marker: {}", e)))?;
+    send.finish().await
+        .map_err(|e| crate::core::AppError::Network(format!("Failed to finish stream: {}", e)))?;
+
+    // Wait for acknowledgment
+    let mut ack_buf = [0u8; 1];
+    let _ = tokio::time::timeout(Duration::from_secs(5), recv.read(&mut ack_buf)).await;
+
+    Ok(())
+}
+
+/// File header for each file in transfer
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct FileHeader {
+    task_id: Uuid,
+    file_id: u64,
+    file_name: String,
+    file_size: u64,
+    relative_path: String,
+    checksum: Option<String>,
 }
 
 /// Background task for progress updates
@@ -330,16 +619,12 @@ pub async fn start_progress_updater(app_state: Arc<AppState>) {
         ticker.tick().await;
 
         for entry in app_state.transfer_tasks.iter() {
-            let mut task = entry.lock().await;
+            let task = entry.lock().await;
 
             if task.status == TransferStatus::Transferring {
-                // Calculate speed based on recent progress
-                // This is a simplified calculation
-                // TODO: Implement proper speed calculation
-
                 // Emit progress event to frontend
                 let info = TransferTaskInfo::from(&*task);
-                // Event emission would go here
+                let _ = app_state.emit_async("transfer-progress", &info).await;
             }
         }
     }
@@ -371,4 +656,234 @@ pub async fn pause_transfer(task_id: Uuid, state: Arc<AppState>) -> AppResult<()
 pub async fn resume_transfer(task_id: Uuid, state: Arc<AppState>) -> AppResult<()> {
     let manager = TransferManager::new(state);
     manager.resume_transfer(task_id).await
+}
+
+/// Resume a transfer task from saved state
+async fn resume_transfer_task(
+    task_id: Uuid,
+    resume_info: ResumeInfo,
+    app_state: Arc<AppState>,
+) -> AppResult<()> {
+    // Get peer address from stored device info
+    let peer_device = app_state.devices.get(&resume_info.peer_device_id)
+        .ok_or_else(|| crate::core::AppError::DeviceNotFound(
+            format!("Peer device {} not found", resume_info.peer_device_id)
+        ))?;
+
+    let peer_addr = SocketAddr::new(peer_device.ip_address, peer_device.quic_port);
+    drop(peer_device);
+
+    // Get upload limit from settings
+    let upload_limit = {
+        let storage = crate::storage::get_storage();
+        storage
+            .and_then(|s| s.load_settings().ok().flatten())
+            .map(|s| s.upload_limit)
+            .unwrap_or(0)
+    };
+
+    // Collect files from resume info
+    let files: Vec<FileMetadata> = resume_info.files.values()
+        .map(|f| f.metadata.clone())
+        .collect();
+
+    log::info!("Resuming transfer {} to {} at {}", task_id, resume_info.peer_device_name, peer_addr);
+
+    // Connect and send files with resume support
+    match send_files_data_with_resume(
+        peer_addr,
+        task_id,
+        files,
+        resume_info,
+        upload_limit,
+        app_state.clone(),
+    ).await {
+        Ok(_) => {
+            log::info!("Resumed transfer {} completed successfully", task_id);
+            if let Some(entry) = app_state.transfer_tasks.get(&task_id) {
+                let mut task = entry.lock().await;
+                task.set_status(TransferStatus::Completed);
+            }
+            // Clean up resume info
+            if let Some(storage) = crate::storage::get_storage() {
+                let _ = storage.delete_resume_info(task_id);
+            }
+        }
+        Err(e) => {
+            log::error!("Resumed transfer {} failed: {}", task_id, e);
+            if let Some(entry) = app_state.transfer_tasks.get(&task_id) {
+                let mut task = entry.lock().await;
+                task.set_error(e.to_string());
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Send file data with resume support (sender side)
+async fn send_files_data_with_resume(
+    peer_addr: SocketAddr,
+    task_id: Uuid,
+    files: Vec<FileMetadata>,
+    _resume_info: ResumeInfo,
+    upload_limit: u32,
+    app_state: Arc<AppState>,
+) -> AppResult<()> {
+    // Create a temporary endpoint for connection
+    let client_config = crate::network::connection::create_client_config()?;
+    let bind_addr: SocketAddr = "0.0.0.0:0".parse()
+        .map_err(|e| crate::core::AppError::Other(format!("Invalid bind address: {}", e)))?;
+    let mut endpoint = quinn::Endpoint::client(bind_addr)?;
+    endpoint.set_default_client_config(client_config);
+
+    // Connect to peer
+    let connecting = endpoint.connect(peer_addr, "chuanshu.local")
+        .map_err(|e| crate::core::AppError::Other(format!("Failed to connect: {}", e)))?;
+    let connection = match tokio::time::timeout(Duration::from_secs(10), connecting).await {
+        Ok(Ok(conn)) => conn,
+        Ok(Err(e)) => return Err(crate::core::AppError::Network(format!("Connection failed: {}", e))),
+        Err(_) => return Err(crate::core::AppError::Other("Connection timeout".to_string())),
+    };
+
+    // Open stream for data transfer
+    let (mut send, mut recv) = connection.open_bi().await
+        .map_err(|e| crate::core::AppError::Network(format!("Failed to open stream: {}", e)))?;
+
+    // Create rate limiter for upload
+    let rate_limiter = SharedRateLimiter::new(upload_limit);
+
+    let mut transferred_size: u64 = 0;
+    let mut last_update_time = std::time::Instant::now();
+    let mut last_transferred = 0u64;
+
+    // Send each file
+    for (file_index, file_meta) in files.iter().enumerate() {
+        // Update current file in task
+        if let Some(entry) = app_state.transfer_tasks.get(&task_id) {
+            let mut task = entry.lock().await;
+            task.set_current_file(&file_meta.file_name, file_index as u32);
+        }
+
+        // Send file header
+        let file_header = FileHeader {
+            task_id,
+            file_id: file_meta.file_id,
+            file_name: file_meta.file_name.clone(),
+            file_size: file_meta.file_size,
+            relative_path: file_meta.relative_path.clone(),
+            checksum: file_meta.checksum.clone(),
+        };
+
+        // Send header with length prefix
+        let header_data = bincode::serialize(&file_header)?;
+        send.write_all(&header_data.len().to_be_bytes()).await
+            .map_err(|e| crate::core::AppError::Network(format!("Failed to write header: {}", e)))?;
+        send.write_all(&header_data).await
+            .map_err(|e| crate::core::AppError::Network(format!("Failed to write header data: {}", e)))?;
+
+        // Read and send file chunks using source_path
+        let file_path = Path::new(&file_meta.source_path);
+        let mut file = tokio::fs::File::open(file_path).await?;
+
+        let chunk_size = DEFAULT_CHUNK_SIZE as u64;
+        let mut offset: u64 = 0;
+        let mut chunk_index: u64 = 0;
+        let total_chunks = ((file_meta.file_size + chunk_size - 1) / chunk_size).max(1);
+
+        loop {
+            // Check if task is paused or canceled
+            if let Some(entry) = app_state.transfer_tasks.get(&task_id) {
+                let task = entry.lock().await;
+                if task.status == TransferStatus::Canceled {
+                    return Err(crate::core::AppError::Other("Transfer canceled".to_string()));
+                }
+                if task.status == TransferStatus::Paused {
+                    drop(task);
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+            }
+
+            // Read chunk
+            let mut buffer = vec![0u8; chunk_size.min(file_meta.file_size - offset) as usize];
+            let n = file.read(&mut buffer).await?;
+            if n == 0 {
+                break;
+            }
+            buffer.truncate(n);
+
+            // Calculate checksum
+            let checksum = calculate_crc32(&buffer);
+
+            // Create chunk metadata
+            let chunk_meta = ChunkMetadata {
+                task_id,
+                file_id: file_meta.file_id,
+                chunk_index,
+                total_chunks,
+                chunk_size: n as u32,
+                offset,
+                checksum,
+            };
+
+            // Create data packet
+            let packet = DataPacket {
+                metadata: chunk_meta,
+                data: buffer,
+            };
+
+            // Send packet
+            let packet_data = bincode::serialize(&packet)?;
+            send.write_all(&packet_data.len().to_be_bytes()).await
+                .map_err(|e| crate::core::AppError::Network(format!("Failed to write packet: {}", e)))?;
+            send.write_all(&packet_data).await
+                .map_err(|e| crate::core::AppError::Network(format!("Failed to write packet data: {}", e)))?;
+
+            // Apply rate limiting after sending data
+            if upload_limit > 0 {
+                rate_limiter.consume_and_wait(packet_data.len() as u64).await;
+            }
+
+            offset += n as u64;
+            chunk_index += 1;
+            transferred_size += n as u64;
+
+            // Emit progress every 100ms
+            let now = std::time::Instant::now();
+            if now.duration_since(last_update_time) >= Duration::from_millis(100) {
+                let elapsed = now.duration_since(last_update_time).as_secs_f64();
+                let speed = if elapsed > 0.0 {
+                    ((transferred_size - last_transferred) as f64 / elapsed) as u64
+                } else {
+                    0
+                };
+
+                // Update task and emit event
+                if let Some(entry) = app_state.transfer_tasks.get(&task_id) {
+                    let mut task = entry.lock().await;
+                    task.update_progress(transferred_size, speed);
+
+                    // Emit event to frontend
+                    let info = TransferTaskInfo::from(&*task);
+                    let _ = app_state.emit_async("transfer-progress", &info).await;
+                }
+
+                last_update_time = now;
+                last_transferred = transferred_size;
+            }
+        }
+    }
+
+    // Send transfer complete marker
+    send.write_all(&0u32.to_be_bytes()).await
+        .map_err(|e| crate::core::AppError::Network(format!("Failed to write complete marker: {}", e)))?;
+    send.finish().await
+        .map_err(|e| crate::core::AppError::Network(format!("Failed to finish stream: {}", e)))?;
+
+    // Wait for acknowledgment
+    let mut ack_buf = [0u8; 1];
+    let _ = tokio::time::timeout(Duration::from_secs(5), recv.read(&mut ack_buf)).await;
+
+    Ok(())
 }

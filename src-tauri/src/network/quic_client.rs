@@ -1,12 +1,13 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
-use quinn::Endpoint;
+use quinn::{Endpoint, Connection};
 use uuid::Uuid;
 
 use crate::core::{AppResult, AppState};
 use crate::network::connection::{create_client_config, get_connection_pool, init_connection_pool};
 use crate::network::protocol::{ControlMessage, ControlMessageType, TransferRequest, TransferResponse};
 use crate::transfer::{TransferTask, TransferType};
+use crate::network::auth::authenticate_as_client;
 
 /// QUIC client for initiating connections
 pub struct QuicClient {
@@ -43,10 +44,30 @@ impl QuicClient {
         let pool = init_connection_pool().await;
         let peer_conn = pool.get_or_connect(peer_device_id, peer_addr, &self.endpoint).await?;
 
+        // Get the underlying connection for remote address
+        let connection = peer_conn.connection().clone();
+        let remote_addr = connection.remote_address();
+
+        // Open stream for authentication handshake
+        let (send, recv) = peer_conn.open_stream().await?;
+
+        // Perform client authentication
+        let peer_device_id = authenticate_as_client(
+            send,
+            recv,
+            app_state.device_id,
+            app_state.device_name.clone(),
+            remote_addr,
+            app_state.clone(),
+        ).await?;
+
+        log::info!("Authenticated with peer device {} at {}", peer_device_id, remote_addr);
+
+        // Open new stream for transfer request after authentication
+        let (mut send, mut recv) = peer_conn.open_stream().await?;
+
         // Send transfer request
         let message = ControlMessage::new(ControlMessageType::TransferRequest, &request)?;
-
-        let (mut send, mut recv) = peer_conn.open_stream().await?;
 
         // Send message with length prefix
         let data = message.to_bytes()?;

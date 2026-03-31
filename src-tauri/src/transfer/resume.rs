@@ -6,12 +6,19 @@ use uuid::Uuid;
 use crate::core::AppResult;
 use crate::transfer::file_chunk::FileChunker;
 use crate::network::protocol::FileMetadata;
+use crate::transfer::TransferType;
 
 /// Resume information for a transfer task
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResumeInfo {
     /// Transfer task ID
     pub task_id: Uuid,
+    /// Peer device ID
+    pub peer_device_id: Uuid,
+    /// Peer device name
+    pub peer_device_name: String,
+    /// Transfer type (send/receive)
+    pub transfer_type: TransferType,
     /// File resume info indexed by file_id
     pub files: HashMap<u64, FileResumeInfo>,
     /// Total bytes transferred
@@ -35,7 +42,14 @@ pub struct FileResumeInfo {
 
 impl ResumeInfo {
     /// Create new resume info for a transfer
-    pub fn new(task_id: Uuid, files: Vec<FileMetadata>, download_path: PathBuf) -> Self {
+    pub fn new(
+        task_id: Uuid,
+        peer_device_id: Uuid,
+        peer_device_name: String,
+        transfer_type: TransferType,
+        files: Vec<FileMetadata>,
+        download_path: PathBuf,
+    ) -> Self {
         let files_map: HashMap<u64, FileResumeInfo> = files
             .into_iter()
             .map(|metadata| {
@@ -56,6 +70,9 @@ impl ResumeInfo {
 
         Self {
             task_id,
+            peer_device_id,
+            peer_device_name,
+            transfer_type,
             files: files_map,
             total_transferred: 0,
             last_updated: current_timestamp(),
@@ -156,13 +173,13 @@ impl ResumeInfo {
 }
 
 /// Resume manager for persisting and loading resume info
-pub struct ResumeManager {
-    storage: crate::storage::Storage,
+pub struct ResumeManager<'a> {
+    storage: &'a crate::storage::Storage,
 }
 
-impl ResumeManager {
+impl<'a> ResumeManager<'a> {
     /// Create a new resume manager
-    pub fn new(storage: crate::storage::Storage) -> Self {
+    pub fn new(storage: &'a crate::storage::Storage) -> Self {
         Self { storage }
     }
 

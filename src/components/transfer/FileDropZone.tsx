@@ -1,9 +1,10 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { Card, message, Modal, List, Button } from 'antd'
 import { InboxOutlined, SendOutlined } from '@ant-design/icons'
 import { useDeviceStore } from '../../store/useDeviceStore'
 import { sendFiles } from '../../services/tauriApi'
-import { listen } from '@tauri-apps/api/event'
+import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
+import type { DragDropEvent } from '@tauri-apps/api/webviewWindow'
 
 interface FileItem {
   name: string
@@ -20,25 +21,9 @@ export default function FileDropZone({ selectedDeviceId }: FileDropZoneProps) {
   const [fileList, setFileList] = useState<FileItem[]>([])
   const [isModalOpen, setIsModalOpen] = useState(false)
   const [isSending, setIsSending] = useState(false)
+  const [isDragging, setIsDragging] = useState(false)
 
-  useEffect(() => {
-    // Listen for Tauri file drop events
-    const setupDragDrop = async () => {
-      try {
-        const unlisten = await listen<string[]>('tauri://file-drop', (event) => {
-          handleFileDrop(event.payload)
-        })
-
-        return unlisten
-      } catch (error) {
-        console.error('Failed to setup drag-drop:', error)
-      }
-    }
-
-    setupDragDrop()
-  }, [selectedDeviceId])
-
-  const handleFileDrop = (paths: string[]) => {
+  const handleFileDrop = useCallback((paths: string[]) => {
     if (!selectedDeviceId) {
       message.error('请先选择要发送的设备')
       return
@@ -51,7 +36,51 @@ export default function FileDropZone({ selectedDeviceId }: FileDropZoneProps) {
 
     setFileList((prev) => [...prev, ...newFiles])
     message.success(`已添加 ${newFiles.length} 个文件`)
+    setIsDragging(false)
+  }, [selectedDeviceId])
+
+  // Prevent default browser behavior for drag events
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
   }
+
+  const handleDragEnter = (e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    if (selectedDeviceId) {
+      setIsDragging(true)
+    }
+  }
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setIsDragging(false)
+  }
+
+  useEffect(() => {
+    // Listen for Tauri file drop events using Tauri v2 API
+    const setupDragDrop = async () => {
+      try {
+        const appWindow = getCurrentWebviewWindow()
+        const unlisten = await appWindow.onDragDropEvent((event: { payload: DragDropEvent }) => {
+          if (event.payload.type === 'drop') {
+            // User dropped files
+            handleFileDrop(event.payload.paths)
+          }
+          // 'over' - user is hovering with files
+          // 'leave' - user cancelled the drag operation
+        })
+
+        return unlisten
+      } catch (error) {
+        console.error('Failed to setup drag-drop:', error)
+      }
+    }
+
+    setupDragDrop()
+  }, [handleFileDrop])
 
   const handleRemoveFile = (index: number) => {
     setFileList((prev) => prev.filter((_, i) => i !== index))
@@ -101,14 +130,18 @@ export default function FileDropZone({ selectedDeviceId }: FileDropZoneProps) {
     <>
       <Card>
         <div
+          onDragOver={handleDragOver}
+          onDragEnter={handleDragEnter}
+          onDragLeave={handleDragLeave}
           style={{
-            border: '2px dashed #d9d9d9',
+            border: `2px dashed ${isDragging ? '#1890ff' : '#d9d9d9'}`,
             borderRadius: '6px',
             padding: '20px',
             textAlign: 'center',
-            backgroundColor: fileList.length > 0 ? '#fafafa' : '#fff',
+            backgroundColor: isDragging ? '#e6f7ff' : fileList.length > 0 ? '#fafafa' : '#fff',
             cursor: selectedDeviceId ? 'pointer' : 'not-allowed',
             opacity: selectedDeviceId ? 1 : 0.5,
+            transition: 'all 0.2s ease',
           }}
         >
           <InboxOutlined style={{ fontSize: 48, color: selectedDeviceId ? '#1890ff' : '#ccc' }} />
@@ -120,6 +153,11 @@ export default function FileDropZone({ selectedDeviceId }: FileDropZoneProps) {
               ? `将发送到：${selectedDevice?.device_name || '未知设备'}`
               : '请先在左侧选择目标设备'}
           </p>
+          {isDragging && (
+            <p style={{ color: '#1890ff', fontSize: 14, marginTop: 8 }}>
+              释放以上传文件
+            </p>
+          )}
         </div>
 
         {fileList.length > 0 && (

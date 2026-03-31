@@ -1,4 +1,4 @@
-import { Card, Table, Button, Space, message } from 'antd'
+import { Card, Table, Button, Space, message, Modal } from 'antd'
 import { FolderOutlined, DeleteOutlined, RedoOutlined } from '@ant-design/icons'
 import { useEffect, useState } from 'react'
 import { getTransferHistory, clearTransferHistory, type TransferHistoryEntry } from '../services/tauriApi'
@@ -55,7 +55,7 @@ const convertToTableItem = (entry: TransferHistoryEntry): TableItem => {
   }
 }
 
-const columns = [
+const columns: any[] = [
   {
     title: '文件名',
     dataIndex: 'fileNames',
@@ -105,12 +105,6 @@ const columns = [
     title: '操作',
     key: 'action',
     width: 150,
-    render: () => (
-      <Space size={4}>
-        <Button type="text" icon={<FolderOutlined />} title="打开位置" />
-        <Button type="text" icon={<RedoOutlined />} title="重新发送" />
-      </Space>
-    ),
   },
 ]
 
@@ -132,15 +126,64 @@ export default function HistoryPage() {
   }
 
   const handleClearHistory = async () => {
-    try {
-      await clearTransferHistory()
-      message.success('历史记录已清空')
-      loadHistory()
-    } catch (error) {
-      message.error('清空历史记录失败')
-      console.error('Failed to clear history:', error)
-    }
+    Modal.confirm({
+      title: '确认清空历史记录？',
+      content: '清空后将无法恢复，确定要继续吗？',
+      okText: '确定',
+      cancelText: '取消',
+      okType: 'danger',
+      onOk: async () => {
+        try {
+          await clearTransferHistory()
+          message.success('历史记录已清空')
+          loadHistory()
+        } catch (error) {
+          message.error('清空历史记录失败')
+          console.error('Failed to clear history:', error)
+        }
+      },
+    })
   }
+
+  const handleOpenLocation = async (_record: TableItem) => {
+    // For completed receive transfers, we could store the download path
+    // For now, show a message as we don't have the actual path stored
+    message.info('文件路径需要在历史记录中保存')
+    // TODO: Once we have file_path in TransferHistoryEntry, call:
+    // await openFileLocation(record.filePath)
+  }
+
+  const handleResend = async (_record: TableItem) => {
+    // TODO: This would need the original file paths to resend
+    // For now, show a message
+    message.info('重新发送功能需要原始文件路径')
+  }
+
+  const columnsWithHandlers = columns.map(col => {
+    if (col.key === 'action') {
+      return {
+        ...col,
+        render: (_: unknown, record: TableItem) => (
+          <Space size={4}>
+            <Button
+              type="text"
+              icon={<FolderOutlined />}
+              title="打开位置"
+              onClick={() => handleOpenLocation(record)}
+            />
+            <Button
+              type="text"
+              icon={<RedoOutlined />}
+              title="重新发送"
+              disabled={record.type !== 'send'}
+              onClick={() => handleResend(record)}
+            />
+          </Space>
+        ),
+      }
+    }
+    return col
+  })
 
   useEffect(() => {
     loadHistory()
@@ -161,7 +204,7 @@ export default function HistoryPage() {
       }
     >
       <Table
-        columns={columns}
+        columns={columnsWithHandlers}
         dataSource={data}
         rowKey="key"
         pagination={{ pageSize: 20, showSizeChanger: false }}

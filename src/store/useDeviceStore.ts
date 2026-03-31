@@ -1,8 +1,9 @@
 import { create } from 'zustand'
-import type { DeviceInfo, KnownDevice } from '../services/tauriApi'
+import type { DeviceInfo, KnownDevice, DeviceStatus } from '../services/tauriApi'
 
 export interface DeviceWithStatus extends DeviceInfo {
   is_online: boolean
+  status: DeviceStatus  // 四态：scanning | connecting | online | offline
   last_connected?: number | null
 }
 
@@ -25,6 +26,7 @@ interface DeviceState {
   // Update device online status from event
   setDeviceOnline: (device: DeviceInfo) => void
   setDeviceOffline: (deviceId: string) => void
+  setDeviceStatus: (deviceId: string, status: DeviceStatus) => void
 }
 
 export const useDeviceStore = create<DeviceState>((set, get) => ({
@@ -92,6 +94,7 @@ export const useDeviceStore = create<DeviceState>((set, get) => ({
       })(),
       last_seen: kd.last_seen,
       is_online: kd.is_online,
+      status: kd.is_online ? 'online' : 'offline',  // 从已知设备加载时，在线=online，否则=offline
       last_connected: kd.last_connected,
     }))
 
@@ -120,7 +123,7 @@ export const useDeviceStore = create<DeviceState>((set, get) => ({
       set({
         devices: devices.map(d =>
           d.device_id === device.device_id
-            ? { ...d, ...device, is_online: true }
+            ? { ...d, ...device, is_online: true, status: 'online' }
             : d
         )
       })
@@ -129,6 +132,7 @@ export const useDeviceStore = create<DeviceState>((set, get) => ({
       const newDevice: DeviceWithStatus = {
         ...device,
         is_online: true,
+        status: 'online',
         last_connected: Date.now() / 1000,
       }
       set({ devices: [...devices, newDevice] })
@@ -139,7 +143,17 @@ export const useDeviceStore = create<DeviceState>((set, get) => ({
     const { devices } = get()
     set({
       devices: devices.map(d =>
-        d.device_id === deviceId ? { ...d, is_online: false } : d
+        d.device_id === deviceId ? { ...d, is_online: false, status: 'offline' } : d
+      )
+    })
+  },
+
+  // Set device status (for scanning/connecting states)
+  setDeviceStatus: (deviceId, status) => {
+    const { devices } = get()
+    set({
+      devices: devices.map(d =>
+        d.device_id === deviceId ? { ...d, status } : d
       )
     })
   },

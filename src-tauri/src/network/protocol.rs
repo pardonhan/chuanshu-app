@@ -134,6 +134,12 @@ impl DiscoveryPacket {
 /// Control message types for QUIC connections
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ControlMessageType {
+    /// Authentication handshake - Hello
+    AuthHello,
+    /// Authentication handshake - Response with certificate fingerprint
+    AuthResponse,
+    /// Authentication handshake - Acknowledge
+    AuthAck,
     /// File transfer request
     TransferRequest,
     /// File transfer response (accept/reject)
@@ -150,6 +156,47 @@ pub enum ControlMessageType {
     ProgressUpdate,
     /// Error notification
     Error,
+}
+
+/// Authentication hello message
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthHello {
+    /// Device ID
+    pub device_id: Uuid,
+    /// Device name
+    pub device_name: String,
+    /// Protocol version
+    pub protocol_version: String,
+    /// Random nonce for challenge-response
+    pub nonce: Vec<u8>,
+}
+
+/// Authentication response message
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthResponse {
+    /// Device ID
+    pub device_id: Uuid,
+    /// Device name
+    pub device_name: String,
+    /// Certificate fingerprint (SHA-256)
+    pub cert_fingerprint: String,
+    /// Signature of the nonce from AuthHello
+    pub signature: Vec<u8>,
+    /// Random nonce for challenge-response
+    pub nonce: Vec<u8>,
+}
+
+/// Authentication acknowledge message
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthAck {
+    /// Device ID
+    pub device_id: Uuid,
+    /// Signature of the nonce from AuthResponse
+    pub signature: Vec<u8>,
+    /// Authentication result
+    pub authenticated: bool,
+    /// Error message if authentication failed
+    pub error: Option<String>,
 }
 
 /// File metadata for transfer
@@ -169,6 +216,9 @@ pub struct FileMetadata {
     pub checksum: Option<String>,
     /// Is directory
     pub is_directory: bool,
+    /// Source file path (for sender, not transmitted)
+    #[serde(skip)]
+    pub source_path: String,
 }
 
 /// Transfer request message

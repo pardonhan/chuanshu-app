@@ -5,7 +5,7 @@ use serde::Serialize;
 
 use crate::core::AppResult;
 use crate::ipc::Settings;
-use crate::transfer::resume::ResumeInfo;
+use crate::transfer::{resume::ResumeInfo, TransferType};
 
 pub use crate::network::device::KnownDevice;
 
@@ -298,9 +298,9 @@ impl Storage {
              updated_at = excluded.updated_at",
             params![
                 resume_info.task_id.to_string(),
-                "unknown", // TODO: Store peer_device_id properly
-                "unknown", // TODO: Store peer_device_name properly
-                "receive", // TODO: Store transfer_type properly
+                resume_info.peer_device_id.to_string(),
+                resume_info.peer_device_name,
+                format!("{:?}", resume_info.transfer_type),
                 first_file.metadata.file_size as i64,
                 resume_info.total_transferred as i64,
                 files_json,
@@ -315,25 +315,42 @@ impl Storage {
     /// Load resume info
     pub fn load_resume_info(&self, task_id: Uuid) -> AppResult<Option<ResumeInfo>> {
         let result = self.conn.query_row(
-            "SELECT files_json, received_chunks_json FROM resume_info WHERE task_id = ?1",
+            "SELECT peer_device_id, peer_device_name, transfer_type, files_json, received_chunks_json, total_transferred
+             FROM resume_info WHERE task_id = ?1",
             [task_id.to_string()],
             |row| {
-                let files_json: String = row.get(0)?;
-                let received_chunks_json: String = row.get(1)?;
-                Ok((files_json, received_chunks_json))
+                let peer_device_id: String = row.get(0)?;
+                let peer_device_name: String = row.get(1)?;
+                let transfer_type: String = row.get(2)?;
+                let files_json: String = row.get(3)?;
+                let received_chunks_json: String = row.get(4)?;
+                let total_transferred: i64 = row.get(5)?;
+                Ok((peer_device_id, peer_device_name, transfer_type, files_json, received_chunks_json, total_transferred))
             },
         ).optional()?;
 
-        if let Some((files_json, received_chunks_json)) = result {
+        if let Some((peer_device_id_str, peer_device_name, transfer_type_str, files_json, received_chunks_json, total_transferred)) = result {
             let files: std::collections::HashMap<u64, crate::transfer::resume::FileResumeInfo> =
                 serde_json::from_str(&files_json)?;
             let received_chunks: std::collections::HashMap<u64, Vec<u8>> =
                 serde_json::from_str(&received_chunks_json)?;
 
+            let peer_device_id = Uuid::parse_str(&peer_device_id_str)
+                .map_err(|e| crate::core::AppError::Other(format!("Invalid peer device ID: {}", e)))?;
+
+            let transfer_type = match transfer_type_str.as_str() {
+                "Send" => TransferType::Send,
+                "Receive" => TransferType::Receive,
+                _ => TransferType::Receive, // Default to Receive
+            };
+
             let mut resume_info = ResumeInfo {
                 task_id,
+                peer_device_id,
+                peer_device_name,
+                transfer_type,
                 files,
-                total_transferred: 0,
+                total_transferred: total_transferred as u64,
                 last_updated: 0,
             };
 
@@ -362,26 +379,39 @@ impl Storage {
     /// List all incomplete transfers
     pub fn list_incomplete_transfers(&self) -> AppResult<Vec<ResumeInfo>> {
         let mut stmt = self.conn.prepare(
-            "SELECT task_id, files_json, received_chunks_json FROM resume_info ORDER BY updated_at DESC"
+            "SELECT task_id, peer_device_id, peer_device_name, transfer_type, files_json, received_chunks_json, total_transferred
+             FROM resume_info ORDER BY updated_at DESC"
         )?;
 
-        let entries: Vec<(String, String, String)> = stmt.query_map([], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        let entries: Vec<(String, String, String, String, String, String, i64)> = stmt.query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?))
         })?
         .collect::<Result<Vec<_>, _>>()?;
 
         let mut result = Vec::new();
-        for (task_id_str, files_json, received_chunks_json) in entries {
+        for (task_id_str, peer_device_id_str, peer_device_name, transfer_type_str, files_json, received_chunks_json, total_transferred) in entries {
             if let Ok(task_id) = Uuid::parse_str(&task_id_str) {
                 let files: std::collections::HashMap<u64, crate::transfer::resume::FileResumeInfo> =
                     serde_json::from_str(&files_json)?;
                 let received_chunks: std::collections::HashMap<u64, Vec<u8>> =
                     serde_json::from_str(&received_chunks_json)?;
 
+                let peer_device_id = Uuid::parse_str(&peer_device_id_str)
+                    .map_err(|e| crate::core::AppError::Other(format!("Invalid peer device ID: {}", e)))?;
+
+                let transfer_type = match transfer_type_str.as_str() {
+                    "Send" => TransferType::Send,
+                    "Receive" => TransferType::Receive,
+                    _ => TransferType::Receive,
+                };
+
                 let mut resume_info = ResumeInfo {
                     task_id,
+                    peer_device_id,
+                    peer_device_name,
+                    transfer_type,
                     files,
-                    total_transferred: 0,
+                    total_transferred: total_transferred as u64,
                     last_updated: 0,
                 };
 
@@ -528,6 +558,15 @@ impl Storage {
         self.conn.execute(
             "UPDATE known_devices SET is_online = 0 WHERE device_id = ?1",
             params![device_id.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// Mark all devices as offline (called on startup)
+    pub fn mark_all_devices_offline(&self) -> AppResult<()> {
+        self.conn.execute(
+            "UPDATE known_devices SET is_online = 0 WHERE is_online = 1",
+            params![],
         )?;
         Ok(())
     }

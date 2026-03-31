@@ -14,6 +14,25 @@ export interface DeviceInfo {
   is_online?: boolean  // Optional: for known devices that may be offline
 }
 
+// Device connection status for UI
+export type DeviceStatus = 'scanning' | 'connecting' | 'online' | 'offline'
+
+// Device status colors (from design review)
+export const DEVICE_STATUS_COLORS: Record<DeviceStatus, string> = {
+  scanning: '#9CA3AF',   // 灰色 - 正在扫描
+  connecting: '#F59E0B', // 黄色 - 连接中
+  online: '#10B981',     // 绿色 - 在线
+  offline: '#6B7280',    // 深灰色 - 离线
+}
+
+// Device status labels
+export const DEVICE_STATUS_LABELS: Record<DeviceStatus, string> = {
+  scanning: '扫描中',
+  connecting: '连接中',
+  online: '在线',
+  offline: '离线',
+}
+
 // Known device type (includes offline devices)
 export interface KnownDevice {
   device_id: string
@@ -150,6 +169,14 @@ export async function setAutoLaunch(enabled: boolean): Promise<void> {
 
 export async function getAutoLaunch(): Promise<boolean> {
   return invoke('get_auto_launch')
+}
+
+export async function openFileLocation(filePath: string): Promise<void> {
+  return invoke('open_file_location', { filePath })
+}
+
+export async function resendFiles(deviceId: string, filePaths: string[]): Promise<string[]> {
+  return invoke('resend_files', { deviceId, filePaths })
 }
 
 // Event listeners

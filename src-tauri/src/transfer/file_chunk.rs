@@ -152,19 +152,8 @@ impl FileAssembler {
         let file = File::create(file_path)?;
 
         // Pre-allocate file space
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
         {
-            use std::os::windows::fs::FileExt;
-            file.set_len(file_size)?;
-        }
-        #[cfg(target_os = "macos")]
-        {
-            use std::os::unix::fs::FileExt;
-            file.set_len(file_size)?;
-        }
-        #[cfg(target_os = "linux")]
-        {
-            use std::os::unix::fs::FileExt;
             file.set_len(file_size)?;
         }
 
