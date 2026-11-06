@@ -1,7 +1,7 @@
-import { Card, Table, Button, Space, message, Modal } from 'antd'
-import { FolderOutlined, DeleteOutlined, RedoOutlined } from '@ant-design/icons'
+import { Card, Table, Button, message, Modal } from 'antd'
+import { DeleteOutlined } from '@ant-design/icons'
 import { useEffect, useState } from 'react'
-import { getTransferHistory, clearTransferHistory, openFileLocation, resendFiles, type TransferHistoryEntry } from '../services/tauriApi'
+import { getTransferHistory, clearTransferHistory, type TransferHistoryEntry } from '../services/tauriApi'
 
 interface TableItem {
   key: string
@@ -55,16 +55,6 @@ const convertToTableItem = (entry: TransferHistoryEntry): TableItem => {
   }
 }
 
-const sourcePathsFor = (entry: TransferHistoryEntry): string[] => {
-  if (!entry.source_path) return []
-  try {
-    const parsed = JSON.parse(entry.source_path)
-    return Array.isArray(parsed) ? parsed : [entry.source_path]
-  } catch {
-    return [entry.source_path]
-  }
-}
-
 const columns: any[] = [
   {
     title: '文件名',
@@ -111,11 +101,6 @@ const columns: any[] = [
     key: 'date',
     width: 160,
   },
-  {
-    title: '操作',
-    key: 'action',
-    width: 150,
-  },
 ]
 
 export default function HistoryPage() {
@@ -155,59 +140,6 @@ export default function HistoryPage() {
     })
   }
 
-  const handleOpenLocation = async (_record: TableItem) => {
-    const path = _record.raw.destination_path || sourcePathsFor(_record.raw)[0]
-    if (!path) {
-      message.info('该记录没有保存文件路径')
-      return
-    }
-    try {
-      await openFileLocation(path)
-    } catch (error) {
-      message.error(error instanceof Error ? error.message : '打开文件位置失败')
-    }
-  }
-
-  const handleResend = async (record: TableItem) => {
-    if (!record.raw.source_path) {
-      message.info('该记录没有保存原始文件路径')
-      return
-    }
-    try {
-      const filePaths = sourcePathsFor(record.raw)
-      await resendFiles(record.raw.peer_device_id, filePaths)
-      message.success('已重新创建传输任务')
-    } catch (error) {
-      message.error(error instanceof Error ? error.message : '重新发送失败')
-    }
-  }
-
-  const columnsWithHandlers = columns.map(col => {
-    if (col.key === 'action') {
-      return {
-        ...col,
-        render: (_: unknown, record: TableItem) => (
-          <Space size={4}>
-            <Button
-              type="text"
-              icon={<FolderOutlined />}
-              title="打开位置"
-              onClick={() => handleOpenLocation(record)}
-            />
-            <Button
-              type="text"
-              icon={<RedoOutlined />}
-              title="重新发送"
-              disabled={record.type !== 'send'}
-              onClick={() => handleResend(record)}
-            />
-          </Space>
-        ),
-      }
-    }
-    return col
-  })
-
   useEffect(() => {
     loadHistory()
   }, [])
@@ -227,7 +159,7 @@ export default function HistoryPage() {
       }
     >
       <Table
-        columns={columnsWithHandlers}
+        columns={columns}
         dataSource={data}
         rowKey="key"
         pagination={{ pageSize: 20, showSizeChanger: false }}

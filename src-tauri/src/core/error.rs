@@ -26,6 +26,9 @@ pub enum AppError {
     #[error("设备未找到: {0}")]
     DeviceNotFound(String),
 
+    #[error("权限错误: {0}")]
+    Permission(String),
+
     #[error("其他错误: {0}")]
     Other(String),
 }

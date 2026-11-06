@@ -8,11 +8,7 @@ interface TransferState {
 
   // Actions
   setTasks: (tasks: TransferTaskInfo[]) => void
-  addTask: (task: TransferTaskInfo) => void
-  updateTask: (task: TransferTaskInfo) => void
-  removeTask: (taskId: string) => void
   updateTaskProgress: (taskId: string, progress: number, speed: number, transferredSize: number) => void
-  upsertTask: (task: TransferTaskInfo) => void
   setTaskStatus: (taskId: string, status: TransferTaskInfo['status']) => void
   setLoading: (loading: boolean) => void
   setError: (error: string | null) => void
@@ -25,28 +21,6 @@ export const useTransferStore = create<TransferState>((set, get) => ({
 
   setTasks: (tasks) => set({ tasks }),
 
-  addTask: (task) => {
-    const { tasks } = get()
-    const exists = tasks.find(t => t.task_id === task.task_id)
-    if (!exists) {
-      set({ tasks: [task, ...tasks] })
-    }
-  },
-
-  updateTask: (task) => {
-    const { tasks } = get()
-    set({
-      tasks: tasks.map(t =>
-        t.task_id === task.task_id ? task : t
-      )
-    })
-  },
-
-  removeTask: (taskId) => {
-    const { tasks } = get()
-    set({ tasks: tasks.filter(t => t.task_id !== taskId) })
-  },
-
   updateTaskProgress: (taskId, progress, speed, transferredSize) => {
     const { tasks } = get()
     set({
@@ -55,16 +29,6 @@ export const useTransferStore = create<TransferState>((set, get) => ({
           ? { ...t, progress, speed, transferred_size: transferredSize }
           : t
       )
-    })
-  },
-
-  upsertTask: (task) => {
-    const { tasks } = get()
-    const exists = tasks.find((t) => t.task_id === task.task_id)
-    set({
-      tasks: exists
-        ? tasks.map((t) => (t.task_id === task.task_id ? task : t))
-        : [task, ...tasks],
     })
   },
 

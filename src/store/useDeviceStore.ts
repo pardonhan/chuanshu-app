@@ -9,7 +9,6 @@ export interface DeviceWithStatus extends DeviceInfo {
 
 interface DeviceState {
   devices: DeviceWithStatus[]
-  selectedDeviceId: string | null
   isLoading: boolean
   error: string | null
 
@@ -18,7 +17,6 @@ interface DeviceState {
   addDevice: (device: DeviceWithStatus) => void
   removeDevice: (deviceId: string) => void
   updateDevice: (device: DeviceWithStatus) => void
-  selectDevice: (deviceId: string | null) => void
   setLoading: (loading: boolean) => void
   setError: (error: string | null) => void
   // Load known devices and merge with online status
@@ -26,12 +24,10 @@ interface DeviceState {
   // Update device online status from event
   setDeviceOnline: (device: DeviceInfo) => void
   setDeviceOffline: (deviceId: string) => void
-  setDeviceStatus: (deviceId: string, status: DeviceStatus) => void
 }
 
 export const useDeviceStore = create<DeviceState>((set, get) => ({
   devices: [],
-  selectedDeviceId: null,
   isLoading: false,
   error: null,
 
@@ -54,10 +50,9 @@ export const useDeviceStore = create<DeviceState>((set, get) => ({
   },
 
   removeDevice: (deviceId) => {
-    const { devices, selectedDeviceId } = get()
+    const { devices } = get()
     set({
       devices: devices.filter(d => d.device_id !== deviceId),
-      selectedDeviceId: selectedDeviceId === deviceId ? null : selectedDeviceId
     })
   },
 
@@ -69,8 +64,6 @@ export const useDeviceStore = create<DeviceState>((set, get) => ({
       )
     })
   },
-
-  selectDevice: (deviceId) => set({ selectedDeviceId: deviceId }),
 
   setLoading: (loading) => set({ isLoading: loading }),
 
@@ -144,16 +137,6 @@ export const useDeviceStore = create<DeviceState>((set, get) => ({
     set({
       devices: devices.map(d =>
         d.device_id === deviceId ? { ...d, is_online: false, status: 'offline' } : d
-      )
-    })
-  },
-
-  // Set device status (for scanning/connecting states)
-  setDeviceStatus: (deviceId, status) => {
-    const { devices } = get()
-    set({
-      devices: devices.map(d =>
-        d.device_id === deviceId ? { ...d, status } : d
       )
     })
   },

@@ -1,901 +1,578 @@
-use quinn::{Connection, Endpoint};
-use std::io::{Seek, SeekFrom, Write};
+use std::io::SeekFrom;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::time::timeout;
-use uuid::Uuid;
 
-use crate::core::{AppResult, AppState, QUIC_DEFAULT_PORT};
-use crate::network::auth::authenticate_as_server;
-use crate::network::connection::{
-    create_server_config, generate_self_signed_cert, init_connection_pool,
+use quinn::{Connection, Endpoint};
+use sha2::{Digest, Sha256};
+use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+use tokio::sync::Mutex;
+
+use crate::core::{
+    AppError, AppResult, AppState, DEFAULT_CHUNK_SIZE, QUIC_DEFAULT_PORT,
+    TRANSFER_PROTOCOL_VERSION, default_download_dir, resolve_download_dir,
 };
 use crate::network::protocol::{
-    ControlMessage, ControlMessageType, DataPacket, DataTransferReady, DataTransferStart,
-    FileHeader, TransferRequest, TransferResponse,
+    read_serialized, write_serialized, FileHeader, TransferRequest, TransferResponse,
+    MAX_CONTROL_FRAME_SIZE, TAG_DATA, TAG_FILE_END, TAG_FILE_HEADER, TAG_TRANSFER_END,
 };
+use crate::network::tls;
 use crate::transfer::file_chunk::calculate_crc32;
 use crate::transfer::rate_limiter::SharedRateLimiter;
-use crate::transfer::{TransferStatus, TransferTask, TransferTaskInfo, TransferType};
+use crate::transfer::{TransferStatus, TransferTask, TransferType};
 
 /// QUIC server handle
 pub struct QuicServer {
     endpoint: Endpoint,
     port: u16,
-    certificate_fingerprint: String,
 }
 
 impl QuicServer {
-    /// Create and bind a new QUIC server
     pub async fn new(port: u16) -> AppResult<Self> {
-        // Generate self-signed certificate
-        let (cert, key) = generate_self_signed_cert()?;
-        let certificate_fingerprint = crate::network::auth::calculate_cert_fingerprint(&cert.0);
-        let server_config = create_server_config(cert, key)?;
-
-        // Bind to address
+        let server_config = tls::server_config()?;
         let addr: SocketAddr = format!("0.0.0.0:{}", port)
             .parse()
-            .map_err(|e| crate::core::AppError::Other(format!("Invalid address: {}", e)))?;
+            .map_err(|e| AppError::Other(format!("Invalid address: {}", e)))?;
 
         let endpoint = Endpoint::server(server_config, addr)?;
         let actual_port = endpoint.local_addr()?.port();
-
         log::info!("QUIC server bound to port {}", actual_port);
 
         Ok(Self {
             endpoint,
             port: actual_port,
-            certificate_fingerprint,
         })
     }
 
-    /// Get the server port
     pub fn port(&self) -> u16 {
         self.port
     }
 
-    pub fn certificate_fingerprint(&self) -> &str {
-        &self.certificate_fingerprint
+    pub async fn run(&self, app_state: Arc<AppState>) -> AppResult<()> {
+        log::info!("QUIC server running on port {}", self.port);
+
+        while let Some(incoming) = self.endpoint.accept().await {
+            let app_state = app_state.clone();
+            tokio::spawn(async move {
+                match incoming.await {
+                    Ok(connection) => {
+                        if let Err(e) = handle_connection(connection, app_state).await {
+                            log::debug!("Transfer connection error: {}", e);
+                        }
+                    }
+                    Err(e) => log::error!("Failed to accept QUIC connection: {}", e),
+                }
+            });
+        }
+
+        Ok(())
     }
 
-    /// Stop the server
     pub fn stop(&self) {
         self.endpoint.close(0u32.into(), b"server shutdown");
         log::info!("QUIC server stopped");
     }
 }
 
-/// Handle an incoming QUIC connection
-async fn handle_incoming_connection(
-    connection: Connection,
-    app_state: Arc<AppState>,
-    pool: Arc<crate::network::connection::ConnectionPool>,
-) -> AppResult<()> {
+/// 一个连接只处理一条双向流：请求 -> 响应 -> 数据 -> 确认
+async fn handle_connection(connection: Connection, app_state: Arc<AppState>) -> AppResult<()> {
     let remote_addr = connection.remote_address();
     log::info!("New QUIC connection from {}", remote_addr);
 
-    // Accept the first stream for authentication handshake
-    let (send, recv) = match timeout(Duration::from_secs(10), connection.accept_bi()).await {
-        Ok(Ok(streams)) => streams,
-        Ok(Err(e)) => {
-            return Err(crate::core::AppError::Network(format!(
-                "Failed to accept stream: {}",
-                e
-            )))
-        }
-        Err(_) => {
-            return Err(crate::core::AppError::Other(
-                "Connection timeout".to_string(),
-            ))
-        }
-    };
-
-    // Perform server authentication
-    let peer_device_id = match authenticate_as_server(
-        send,
-        recv,
-        app_state.device_id,
-        app_state.device_name.clone(),
-        remote_addr,
-        app_state.clone(),
-    )
-    .await
-    {
-        Ok(device_id) => {
-            log::info!("Authenticated peer device {} at {}", device_id, remote_addr);
-            device_id
-        }
-        Err(e) => {
-            log::error!("Authentication failed: {}", e);
-            return Err(e);
-        }
-    };
-
-    // Add to connection pool with authenticated device ID
-    let peer_conn = pool.add_incoming(peer_device_id, connection.clone());
-    peer_conn.mark_authenticated();
-
-    // Start monitoring the connection for keep-alive and disconnect detection
-    peer_conn.start_monitoring(pool.clone());
-
-    // Handle subsequent streams
-    loop {
-        match timeout(Duration::from_secs(30), connection.accept_bi()).await {
-            Ok(Ok((send, recv))) => {
-                let app_state = app_state.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = handle_stream(send, recv, peer_device_id, app_state).await {
-                        log::error!("Stream handler error: {}", e);
-                    }
-                });
-            }
-            Ok(Err(e)) => {
-                log::debug!("Connection closed: {}", e);
-                break;
-            }
-            Err(_) => {
-                log::debug!("Connection accept timeout");
-                continue;
-            }
-        }
-    }
-
-    pool.remove(&peer_device_id);
-    log::info!("QUIC connection from {} closed", remote_addr);
-
-    Ok(())
-}
-
-/// Handle a bidirectional stream
-async fn handle_stream(
-    send: quinn::SendStream,
-    mut recv: quinn::RecvStream,
-    peer_device_id: Uuid,
-    app_state: Arc<AppState>,
-) -> AppResult<()> {
-    // Read message length
-    let mut len_buf = [0u8; 4];
-    recv.read_exact(&mut len_buf).await.map_err(|e| {
-        crate::core::AppError::Other(format!("Failed to read message length: {}", e))
-    })?;
-    let msg_len = u32::from_be_bytes(len_buf) as usize;
-
-    if msg_len > 10 * 1024 * 1024 {
-        // Max 10MB message
-        return Err(crate::core::AppError::Other(
-            "Message too large".to_string(),
-        ));
-    }
-
-    // Read message data
-    let mut msg_buf = vec![0u8; msg_len];
-    recv.read_exact(&mut msg_buf)
+    let (send, recv) = tokio::time::timeout(Duration::from_secs(10), connection.accept_bi())
         .await
-        .map_err(|e| crate::core::AppError::Other(format!("Failed to read message: {}", e)))?;
+        .map_err(|_| AppError::Other("等待传输流超时".to_string()))?
+        .map_err(|e| AppError::Network(format!("接受传输流失败: {}", e)))?;
 
-    // Parse control message
-    let message = ControlMessage::from_bytes(&msg_buf)?;
-
-    match message.message_type {
-        ControlMessageType::TransferRequest => {
-            handle_transfer_request(message, send, recv, peer_device_id, app_state).await?;
-        }
-        ControlMessageType::DataTransferStart => {
-            handle_data_transfer_start(message, send, recv, peer_device_id, app_state).await?;
-        }
-        ControlMessageType::CancelTransfer => {
-            let _ = recv; // Consume recv stream
-            handle_cancel_transfer(message, app_state).await?;
-        }
-        ControlMessageType::PauseTransfer => {
-            let _ = recv; // Consume recv stream
-            handle_pause_transfer(message, app_state).await?;
-        }
-        ControlMessageType::ResumeTransfer => {
-            let _ = recv; // Consume recv stream
-            handle_resume_transfer(message, app_state).await?;
-        }
-        _ => {
-            log::debug!(
-                "Received unhandled message type: {:?}",
-                message.message_type
-            );
-        }
-    }
-
-    Ok(())
+    handle_transfer(send, recv, app_state).await
 }
 
-/// Handle a transfer request
-async fn handle_transfer_request(
-    message: ControlMessage,
+async fn handle_transfer(
     mut send: quinn::SendStream,
-    recv: quinn::RecvStream,
-    peer_device_id: Uuid,
+    mut recv: quinn::RecvStream,
     app_state: Arc<AppState>,
 ) -> AppResult<()> {
-    let request: TransferRequest = message.payload()?;
-
-    if request.sender_id != peer_device_id {
-        return Err(crate::core::AppError::Other(
-            "Transfer sender does not match authenticated peer".to_string(),
-        ));
-    }
+    let request: TransferRequest = read_serialized(&mut recv, MAX_CONTROL_FRAME_SIZE).await?;
 
     log::info!(
-        "Received transfer request from {}: {} files, {} bytes",
+        "Transfer request from {} ({}): {} files, {} bytes",
         request.sender_name,
-        request.file_count,
+        request.sender_id,
+        request.files.len(),
         request.total_size
     );
 
-    // Auto-accept remains available for unattended devices. Otherwise ask the UI.
-    let auto_accept = if let Some(storage) = crate::storage::get_storage() {
-        if let Ok(Some(settings)) = storage.load_settings() {
-            settings.auto_accept
-        } else {
-            false // Default to manual accept if settings cannot be loaded
-        }
+    if request.protocol_version != TRANSFER_PROTOCOL_VERSION {
+        let reason = format!(
+            "协议版本不匹配（本机 {}，对端 {}），请将两端升级到同一版本",
+            TRANSFER_PROTOCOL_VERSION, request.protocol_version
+        );
+        let response = TransferResponse {
+            task_id: request.task_id,
+            accepted: false,
+            reason: Some(reason),
+            save_path: None,
+        };
+        let _ = write_serialized(&mut send, &response).await;
+        let _ = send.finish().await;
+        return Ok(());
+    }
+
+    // 读取接收设置
+    let settings = crate::storage::get_storage()
+        .and_then(|s| s.load_settings().ok().flatten());
+    let auto_accept = settings.as_ref().map(|s| s.auto_accept).unwrap_or(true);
+    let download_path = settings
+        .as_ref()
+        .map(|s| s.download_path.clone())
+        .unwrap_or_default();
+    let download_limit = settings.as_ref().map(|s| s.download_limit).unwrap_or(0);
+
+    let download_dir = if download_path.trim().is_empty() {
+        default_download_dir()
     } else {
-        false // Default to manual accept if storage not initialized
+        resolve_download_dir(&download_path)
     };
 
-    let accepted = if auto_accept {
-        true
-    } else {
-        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-        app_state
-            .pending_transfer_requests
-            .insert(request.task_id, response_tx);
-        let _ = app_state.emit_async("transfer-request", &request).await;
-        tokio::time::timeout(Duration::from_secs(60), response_rx)
-            .await
-            .ok()
-            .and_then(Result::ok)
-            .unwrap_or(false)
-    };
+    if !auto_accept {
+        let response = TransferResponse {
+            task_id: request.task_id,
+            accepted: false,
+            reason: Some("接收端已关闭自动接收".to_string()),
+            save_path: None,
+        };
+        let _ = write_serialized(&mut send, &response).await;
+        let _ = send.finish().await;
+        return Ok(());
+    }
 
-    app_state.pending_transfer_requests.remove(&request.task_id);
+    std::fs::create_dir_all(&download_dir)?;
 
-    let save_path = crate::storage::get_storage()
-        .and_then(|storage| storage.load_settings().ok().flatten())
-        .map(|settings| settings.download_path)
-        .unwrap_or_else(|| get_default_download_path().to_string_lossy().to_string());
-
-    // Create response
     let response = TransferResponse {
         task_id: request.task_id,
-        accepted,
-        reason: if accepted {
-            None
-        } else {
-            Some("Transfer rejected".to_string())
-        },
-        save_path: Some(save_path),
-    };
-
-    // Send response
-    let response_msg = ControlMessage::new(ControlMessageType::TransferResponse, &response)?;
-    let response_data = response_msg.to_bytes()?;
-    let len = response_data.len() as u32;
-
-    send.write_all(&len.to_be_bytes())
-        .await
-        .map_err(|e| crate::core::AppError::Network(format!("Failed to write: {}", e)))?;
-    send.write_all(&response_data)
-        .await
-        .map_err(|e| crate::core::AppError::Network(format!("Failed to write: {}", e)))?;
-    send.finish()
-        .await
-        .map_err(|e| crate::core::AppError::Network(format!("Failed to finish stream: {}", e)))?;
-
-    if accepted {
-        // Create receive task
-        let task = TransferTask::new(
-            request.task_id,
-            peer_device_id,
-            request.sender_name.clone(),
-            TransferType::Receive,
-            request.total_size,
-            request.file_count,
-        );
-
-        app_state
-            .transfer_tasks
-            .insert(request.task_id, Arc::new(tokio::sync::Mutex::new(task)));
-
-        let _ = recv;
-    }
-
-    Ok(())
-}
-
-/// Prepare an accepted data stream and then receive its payload.
-async fn handle_data_transfer_start(
-    message: ControlMessage,
-    mut send: quinn::SendStream,
-    recv: quinn::RecvStream,
-    peer_device_id: Uuid,
-    app_state: Arc<AppState>,
-) -> AppResult<()> {
-    let start: DataTransferStart = message.payload()?;
-    let entry = app_state
-        .transfer_tasks
-        .get(&start.task_id)
-        .ok_or_else(|| crate::core::AppError::Other("Unknown transfer task".to_string()))?;
-    let mut task = entry.lock().await;
-    if task.peer_device_id != peer_device_id {
-        return Err(crate::core::AppError::Other(
-            "Transfer peer mismatch".to_string(),
-        ));
-    }
-    let peer_device_name = task.peer_device_name.clone();
-    task.files = start.files.clone();
-    task.set_status(TransferStatus::Transferring);
-    drop(task);
-    drop(entry);
-
-    let download_path = resolve_download_path();
-
-    let missing_chunks = if let Some(storage) = crate::storage::get_storage() {
-        let mut info = if start.resume {
-            storage.load_resume_info(start.task_id)?
-        } else {
-            None
-        }
-        .unwrap_or_else(|| {
-            crate::transfer::resume::ResumeInfo::new(
-                start.task_id,
-                peer_device_id,
-                peer_device_name.clone(),
-                TransferType::Receive,
-                start.files.clone(),
-                download_path.clone(),
-            )
-        });
-
-        // Drop stale bitmaps if the file metadata changed since the last attempt.
-        info.reconcile_files(&start.files, &download_path);
-        storage.save_resume_info(&info)?;
-
-        start
-            .files
-            .iter()
-            .map(|file| {
-                let chunk_size =
-                    crate::transfer::file_chunk::FileChunker::optimal_chunk_size(file.file_size)
-                        as u64;
-                let total = ((file.file_size + chunk_size - 1) / chunk_size).max(1);
-                let missing = (0..total)
-                    .filter(|index| !info.is_chunk_received(file.file_id, *index))
-                    .collect();
-                (file.file_id, missing)
-            })
-            .collect()
-    } else {
-        start
-            .files
-            .iter()
-            .map(|file| {
-                let chunk_size =
-                    crate::transfer::file_chunk::FileChunker::optimal_chunk_size(file.file_size)
-                        as u64;
-                let total = ((file.file_size + chunk_size - 1) / chunk_size).max(1);
-                (file.file_id, (0..total).collect())
-            })
-            .collect()
-    };
-
-    let ready = DataTransferReady {
-        task_id: start.task_id,
         accepted: true,
         reason: None,
-        missing_chunks,
+        save_path: Some(download_dir.to_string_lossy().to_string()),
     };
-    let peer_device_name_for_event = peer_device_name;
-    let response = ControlMessage::new(ControlMessageType::DataTransferReady, &ready)?;
-    let data = response.to_bytes()?;
-    send.write_all(&(data.len() as u32).to_be_bytes())
-        .await
-        .map_err(|e| {
-            crate::core::AppError::Network(format!("Failed to write data readiness: {}", e))
-        })?;
-    send.write_all(&data).await.map_err(|e| {
-        crate::core::AppError::Network(format!("Failed to write data readiness payload: {}", e))
-    })?;
-    send.finish().await.map_err(|e| {
-        crate::core::AppError::Network(format!("Failed to finish data readiness: {}", e))
-    })?;
+    write_serialized(&mut send, &response).await?;
 
-    let result = receive_files(
-        recv,
-        start.task_id,
-        start.files,
-        peer_device_id,
-        app_state.clone(),
-    )
-    .await;
-    if let Some(entry) = app_state.transfer_tasks.get(&start.task_id) {
-        let mut task = entry.lock().await;
-        match &result {
-            Ok(_) => {
+    // 创建接收任务
+    let mut task = TransferTask::new(
+        request.task_id,
+        request.sender_id,
+        request.sender_name.clone(),
+        TransferType::Receive,
+        request.total_size,
+        request.files.len() as u32,
+    );
+    task.files = request.files.clone();
+    task.set_status(TransferStatus::Transferring);
+    app_state
+        .transfer_tasks
+        .insert(request.task_id, Arc::new(Mutex::new(task)));
+
+    let result = receive_files(&mut recv, &request, &app_state, &download_dir, download_limit).await;
+
+    match result {
+        Ok(()) => {
+            let _ = send.write_all(&[0x00u8]).await;
+            let _ = send.finish().await;
+
+            if let Some(arc) = app_state.transfer_tasks.get(&request.task_id).map(|e| e.value().clone()) {
+                let mut task = arc.lock().await;
                 task.set_status(TransferStatus::Completed);
-                if let Some(storage) = crate::storage::get_storage() {
-                    let file_names = task
-                        .files
-                        .iter()
-                        .map(|file| file.file_name.clone())
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    let metadata_json = serde_json::to_string(&task.files).ok();
-                    let destination_path = task
-                        .save_path
-                        .as_ref()
-                        .map(|path| path.to_string_lossy().to_string());
-                    let _ = storage.add_transfer_history(
-                        start.task_id,
-                        task.peer_device_id,
-                        &task.peer_device_name,
-                        "receive",
-                        "completed",
-                        task.total_size,
-                        task.file_count,
-                        Some(&file_names),
-                        None,
-                        destination_path.as_deref(),
-                        metadata_json.as_deref(),
+                save_history(&task, "completed", None);
+                if let Some(handle) = app_state.get_app_handle() {
+                    let _ = crate::ipc::emit_transfer_completed(
+                        &handle,
+                        request.task_id,
+                        &request.sender_name,
                     );
                 }
             }
-            Err(error) => {
-                task.set_error(error.to_string());
-                if let Some(storage) = crate::storage::get_storage() {
-                    let file_names = task
-                        .files
-                        .iter()
-                        .map(|file| file.file_name.clone())
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    let metadata_json = serde_json::to_string(&task.files).ok();
-                    let destination_path = task
-                        .save_path
-                        .as_ref()
-                        .map(|path| path.to_string_lossy().to_string());
-                    let _ = storage.add_transfer_history(
-                        start.task_id,
-                        task.peer_device_id,
-                        &task.peer_device_name,
-                        "receive",
-                        "failed",
-                        task.total_size,
-                        task.file_count,
-                        Some(&file_names),
-                        None,
-                        destination_path.as_deref(),
-                        metadata_json.as_deref(),
-                    );
+
+            log::info!("Transfer {} received successfully", request.task_id);
+            Ok(())
+        }
+        Err(e) => {
+            let message = e.to_string();
+            log::error!("Transfer {} failed: {}", request.task_id, message);
+
+            send_error_ack(&mut send, &message).await;
+
+            if let Some(arc) = app_state.transfer_tasks.get(&request.task_id).map(|e| e.value().clone()) {
+                let mut task = arc.lock().await;
+                let canceled = task.status == TransferStatus::Canceled;
+                if canceled {
+                    task.set_status(TransferStatus::Canceled);
+                    save_history(&task, "canceled", Some(&message));
+                } else {
+                    task.set_error(message.clone());
+                    save_history(&task, "failed", Some(&message));
+                }
+                if let Some(handle) = app_state.get_app_handle() {
+                    let _ = crate::ipc::emit_transfer_failed(&handle, request.task_id, message);
                 }
             }
+
+            Ok(())
         }
     }
+}
 
-    match &result {
-        Ok(_) => {
-            let _ = app_state
-                .emit_async("transfer-completed", start.task_id)
-                .await;
-            if let Some(handle) = app_state.get_app_handle().await {
-                crate::ipc::send_notification(
-                    &handle,
-                    "传输完成",
-                    &format!("文件已从 {} 接收完成", peer_device_name_for_event),
-                );
-            }
+fn save_history(task: &TransferTask, status: &str, error: Option<&str>) {
+    if let Some(storage) = crate::storage::get_storage() {
+        let file_names = task
+            .files
+            .iter()
+            .map(|f| f.file_name.clone())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let _ = storage.add_transfer_history(
+            task.task_id,
+            task.peer_device_id,
+            &task.peer_device_name,
+            "receive",
+            status,
+            task.total_size,
+            task.file_count,
+            Some(&file_names),
+        );
+        if let Some(err) = error {
+            let _ = storage.update_transfer_status(task.task_id, status, Some(err));
         }
-        Err(error) => {
-            let _ = app_state
-                .emit_async(
-                    "transfer-failed",
-                    serde_json::json!({ "task_id": start.task_id, "error": error.to_string() }),
-                )
-                .await;
-            if let Some(handle) = app_state.get_app_handle().await {
-                crate::ipc::send_notification(
-                    &handle,
-                    "传输失败",
-                    &format!("文件传输失败：{}", error),
-                );
-            }
+    }
+}
+
+async fn send_error_ack(send: &mut quinn::SendStream, message: &str) {
+    let bytes = message.as_bytes();
+    let _ = send.write_all(&[0x01u8]).await;
+    let _ = send.write_all(&(bytes.len() as u32).to_be_bytes()).await;
+    let _ = send.write_all(bytes).await;
+    let _ = send.finish().await;
+}
+
+struct IncomingFile {
+    temp_path: PathBuf,
+    final_path: PathBuf,
+    file: tokio::fs::File,
+    hasher: Sha256,
+    declared_size: u64,
+    received: u64,
+}
+
+/// 接收文件，失败时清理未完成的 .part
+async fn receive_files(
+    recv: &mut quinn::RecvStream,
+    request: &TransferRequest,
+    app_state: &Arc<AppState>,
+    download_dir: &Path,
+    download_limit: u32,
+) -> AppResult<()> {
+    let mut temp_files: Vec<PathBuf> = Vec::new();
+    let result = receive_files_inner(
+        recv,
+        request,
+        app_state,
+        download_dir,
+        download_limit,
+        &mut temp_files,
+    )
+    .await;
+
+    if result.is_err() {
+        for path in temp_files {
+            let _ = tokio::fs::remove_file(&path).await;
         }
     }
 
     result
 }
 
-/// Get default download path
-fn get_default_download_path() -> PathBuf {
-    #[cfg(target_os = "windows")]
-    {
-        if let Ok(userprofile) = std::env::var("USERPROFILE") {
-            return PathBuf::from(format!("{}\\Downloads\\传书", userprofile));
-        }
-    }
-
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    {
-        if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(format!("{}/Downloads/传书", home));
-        }
-    }
-
-    PathBuf::from("./传书")
-}
-
-/// Resolve the configured download directory, expanding `~/`.
-fn resolve_download_path() -> PathBuf {
-    if let Some(storage) = crate::storage::get_storage() {
-        if let Ok(Some(settings)) = storage.load_settings() {
-            let path = settings.download_path.replace(
-                "~/",
-                &std::env::var("HOME").unwrap_or_else(|_| ".".to_string()),
-            );
-            return PathBuf::from(path);
-        }
-    }
-    get_default_download_path()
-}
-
-/// Receive files from sender
-async fn receive_files(
-    mut recv: quinn::RecvStream,
-    task_id: Uuid,
-    files: Vec<crate::network::protocol::FileMetadata>,
-    _sender_id: Uuid,
-    app_state: Arc<AppState>,
+async fn receive_files_inner(
+    recv: &mut quinn::RecvStream,
+    request: &TransferRequest,
+    app_state: &Arc<AppState>,
+    download_dir: &Path,
+    download_limit: u32,
+    temp_files: &mut Vec<PathBuf>,
 ) -> AppResult<()> {
-    let download_path = resolve_download_path();
-    let download_limit = crate::storage::get_storage()
-        .and_then(|storage| storage.load_settings().ok().flatten())
-        .map(|settings| settings.download_bytes_per_sec())
-        .unwrap_or(0);
+    let limiter = SharedRateLimiter::new(download_limit);
+    let mut current: Option<IncomingFile> = None;
+    let mut transferred: u64 = 0;
+    let mut finished_files: usize = 0;
+    let mut received_ids: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    let total_files = request.files.len();
 
-    if let Some(entry) = app_state.transfer_tasks.get(&task_id) {
-        entry.lock().await.save_path = Some(download_path.clone());
-    }
-
-    // Ensure download directory exists
-    std::fs::create_dir_all(&download_path)?;
-
-    // Create rate limiter for download
-    let rate_limiter = SharedRateLimiter::new(download_limit);
-
-    let mut transferred_size: u64 = 0;
-    let mut last_update_time = std::time::Instant::now();
-    let mut last_transferred = 0u64;
-
-    // Create file index for quick lookup
-    let file_map: std::collections::HashMap<u64, crate::network::protocol::FileMetadata> =
-        files.iter().map(|f| (f.file_id, f.clone())).collect();
-
-    let peer_device_name = if let Some(entry) = app_state.transfer_tasks.get(&task_id) {
-        entry.lock().await.peer_device_name.clone()
-    } else {
-        "远程设备".to_string()
-    };
-
-    let mut resume_info = if let Some(storage) = crate::storage::get_storage() {
-        storage.load_resume_info(task_id)?.unwrap_or_else(|| {
-            crate::transfer::resume::ResumeInfo::new(
-                task_id,
-                _sender_id,
-                peer_device_name.clone(),
-                TransferType::Receive,
-                files.clone(),
-                download_path.clone(),
-            )
-        })
-    } else {
-        crate::transfer::resume::ResumeInfo::new(
-            task_id,
-            _sender_id,
-            peer_device_name,
-            TransferType::Receive,
-            files.clone(),
-            download_path.clone(),
-        )
-    };
-    if let Some(storage) = crate::storage::get_storage() {
-        let _ = storage.save_resume_info(&resume_info);
-    }
-
-    // Receive files
     loop {
-        // Read header length
-        let mut len_buf = [0u8; 4];
-        match recv.read_exact(&mut len_buf).await {
-            Ok(_) => {}
-            Err(quinn::ReadExactError::FinishedEarly) => break, // Transfer complete
-            Err(e) => {
-                return Err(crate::core::AppError::Network(format!(
-                    "Failed to read header length: {}",
-                    e
-                )))
-            }
-        }
+        wait_if_paused(app_state, request.task_id).await?;
 
-        let header_len = u32::from_be_bytes(len_buf) as usize;
-
-        // Check for end of transfer marker
-        if header_len == 0 {
-            break;
-        }
-
-        // Read file header
-        let mut header_buf = vec![0u8; header_len];
-        recv.read_exact(&mut header_buf)
+        let mut tag = [0u8; 1];
+        recv.read_exact(&mut tag)
             .await
-            .map_err(|e| crate::core::AppError::Network(format!("Failed to read header: {}", e)))?;
+            .map_err(|e| AppError::Network(format!("读取帧标签失败: {}", e)))?;
 
-        let file_header: FileHeader = bincode::deserialize(&header_buf)?;
+        match tag[0] {
+            TAG_TRANSFER_END => break,
 
-        // Get file metadata (validated via file_header)
-        let _file_meta = file_map.get(&file_header.file_id).ok_or_else(|| {
-            crate::core::AppError::Other(format!(
-                "File {} not found in metadata",
-                file_header.file_id
-            ))
-        })?;
-
-        // Update current file in task
-        if let Some(entry) = app_state.transfer_tasks.get(&task_id) {
-            let mut task = entry.lock().await;
-            task.set_current_file(&file_header.file_name, file_header.file_id as u32);
-        }
-
-        // Create temp file for receiving (task-scoped to avoid collisions)
-        let temp_path = download_path.join(format!(".{}-{}.tmp", task_id, file_header.file_id));
-        let mut temp_file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(&temp_path)?;
-
-        // Pre-allocate file
-        if temp_file.metadata()?.len() != file_header.file_size {
-            temp_file.set_len(file_header.file_size)?;
-        }
-
-        let chunk_size =
-            crate::transfer::file_chunk::FileChunker::optimal_chunk_size(file_header.file_size)
-                as u64;
-        let existing_chunks = resume_info
-            .files
-            .get(&file_header.file_id)
-            .map(|file| file.chunks_received)
-            .unwrap_or(0);
-        let mut received_size: u64 = (existing_chunks * chunk_size).min(file_header.file_size);
-        let _total_chunks = ((file_header.file_size + chunk_size - 1) / chunk_size).max(1);
-        let mut chunk_index: u64 = 0;
-
-        // Receive chunks
-        while received_size < file_header.file_size {
-            // Check if task is paused or canceled
-            if let Some(entry) = app_state.transfer_tasks.get(&task_id) {
-                let task = entry.lock().await;
-                if task.status == TransferStatus::Canceled {
-                    return Err(crate::core::AppError::Other(
-                        "Transfer canceled".to_string(),
-                    ));
-                }
-                if task.status == TransferStatus::Paused {
-                    drop(task);
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    continue;
-                }
-            }
-
-            // Read chunk packet length
-            let mut chunk_len_buf = [0u8; 4];
-            match recv.read_exact(&mut chunk_len_buf).await {
-                Ok(_) => {}
-                Err(quinn::ReadExactError::FinishedEarly) => break,
-                Err(e) => {
-                    return Err(crate::core::AppError::Network(format!(
-                        "Failed to read chunk length: {}",
-                        e
-                    )))
-                }
-            }
-
-            let chunk_len = u32::from_be_bytes(chunk_len_buf) as usize;
-
-            // Check for end of file marker
-            if chunk_len == 0 {
-                break;
-            }
-
-            // Read chunk data
-            let mut chunk_buf = vec![0u8; chunk_len];
-            recv.read_exact(&mut chunk_buf).await.map_err(|e| {
-                crate::core::AppError::Network(format!("Failed to read chunk: {}", e))
-            })?;
-
-            let packet: DataPacket = bincode::deserialize(&chunk_buf)?;
-
-            // Verify checksum
-            let actual_checksum = calculate_crc32(&packet.data);
-            if actual_checksum != packet.metadata.checksum {
-                return Err(crate::core::AppError::Other(format!(
-                    "Chunk {} checksum mismatch: expected {}, got {}",
-                    chunk_index, packet.metadata.checksum, actual_checksum
-                )));
-            }
-
-            // Write chunk to file
-            temp_file.seek(SeekFrom::Start(packet.metadata.offset))?;
-            temp_file.write_all(&packet.data)?;
-
-            received_size += packet.data.len() as u64;
-            transferred_size += packet.data.len() as u64;
-            chunk_index += 1;
-            resume_info.mark_chunk_received(file_header.file_id, packet.metadata.chunk_index);
-            resume_info.total_transferred = transferred_size;
-            if chunk_index % 4 == 0 {
-                if let Some(storage) = crate::storage::get_storage() {
-                    let _ = storage.save_resume_info(&resume_info);
-                }
-            }
-
-            // Apply rate limiting after receiving data
-            if download_limit > 0 {
-                rate_limiter
-                    .consume_and_wait(packet.data.len() as u64)
-                    .await;
-            }
-
-            // Emit progress every 100ms
-            let now = std::time::Instant::now();
-            if now.duration_since(last_update_time) >= Duration::from_millis(100) {
-                let elapsed = now.duration_since(last_update_time).as_secs_f64();
-                let speed = if elapsed > 0.0 {
-                    ((transferred_size - last_transferred) as f64 / elapsed) as u64
-                } else {
-                    0
-                };
-
-                // Update task and emit event
-                if let Some(entry) = app_state.transfer_tasks.get(&task_id) {
-                    let mut task = entry.lock().await;
-                    task.update_progress(transferred_size, speed);
-
-                    let info = TransferTaskInfo::from(&*task);
-                    let _ = app_state.emit_async("transfer-progress", &info).await;
+            TAG_FILE_HEADER => {
+                if current.is_some() {
+                    return Err(AppError::Other("上一个文件尚未结束".to_string()));
                 }
 
-                last_update_time = now;
-                last_transferred = transferred_size;
-            }
-        }
+                let header: FileHeader = read_serialized(recv, MAX_CONTROL_FRAME_SIZE).await?;
 
-        // Flush and sync file
-        temp_file.flush()?;
-        temp_file.sync_all()?;
+                if !received_ids.insert(header.file_id) {
+                    return Err(AppError::Other(format!("重复的文件 ID: {}", header.file_id)));
+                }
 
-        // Verify file checksum if provided
-        if let Some(expected_checksum) = &file_header.checksum {
-            let actual_checksum =
-                crate::transfer::file_chunk::calculate_file_hash(&temp_path).await?;
-            if &actual_checksum != expected_checksum {
-                return Err(crate::core::AppError::Other(format!(
-                    "File checksum mismatch for {}: expected {}, got {}",
-                    file_header.file_name, expected_checksum, actual_checksum
-                )));
-            }
-        }
+                let meta = request
+                    .files
+                    .iter()
+                    .find(|f| f.file_id == header.file_id)
+                    .ok_or_else(|| AppError::Other(format!("未知文件 ID: {}", header.file_id)))?;
+                if meta.file_size != header.file_size {
+                    return Err(AppError::Other(format!(
+                        "文件大小不一致: {} (声明 {}, 实际 {})",
+                        header.file_name, meta.file_size, header.file_size
+                    )));
+                }
 
-        // Create subdirectory if relative_path is not empty (folder transfer support)
-        let safe_relative_path = sanitize_relative_path(&file_header.relative_path)?;
-        let final_path = if !safe_relative_path.as_os_str().is_empty() {
-            let subdir = download_path.join(&safe_relative_path);
-            std::fs::create_dir_all(&subdir)?;
-            subdir.join(&file_header.file_name)
-        } else {
-            download_path.join(&file_header.file_name)
-        };
+                let final_path = build_safe_target(download_dir, &header)?;
+                if let Some(parent) = final_path.parent() {
+                    tokio::fs::create_dir_all(parent).await?;
+                }
 
-        std::fs::rename(&temp_path, &final_path)?;
+                let base = download_dir
+                    .canonicalize()
+                    .unwrap_or_else(|_| download_dir.to_path_buf());
+                let parent = final_path
+                    .parent()
+                    .ok_or_else(|| AppError::Other("非法路径".to_string()))?
+                    .canonicalize()
+                    .map_err(|e| AppError::Other(format!("路径校验失败: {}", e)))?;
+                if !parent.starts_with(&base) {
+                    return Err(AppError::Other("非法的相对路径".to_string()));
+                }
 
-        log::info!(
-            "Received file: {} -> {:?}",
-            file_header.file_name,
-            final_path
-        );
-    }
-
-    if let Some(storage) = crate::storage::get_storage() {
-        let _ = storage.delete_resume_info(task_id);
-    }
-
-    // Send acknowledgment
-    // (connection will be closed by sender after this)
-
-    Ok(())
-}
-
-fn sanitize_relative_path(path: &str) -> AppResult<PathBuf> {
-    use std::path::Component;
-    let mut safe = PathBuf::new();
-    for component in std::path::Path::new(path).components() {
-        match component {
-            Component::Normal(part) => safe.push(part),
-            Component::CurDir => {}
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                return Err(crate::core::AppError::Other(
-                    "Invalid relative file path".to_string(),
+                let final_path = unique_path(&final_path);
+                let temp_path = download_dir.join(format!(
+                    ".{}.{}.part",
+                    request.task_id, header.file_id
                 ));
+
+                let file = tokio::fs::File::create(&temp_path).await?;
+                temp_files.push(temp_path.clone());
+
+                if let Some(arc) = app_state.transfer_tasks.get(&request.task_id).map(|e| e.value().clone()) {
+                    let mut task = arc.lock().await;
+                    task.set_current_file(&header.file_name, finished_files as u32);
+                }
+
+                current = Some(IncomingFile {
+                    temp_path,
+                    final_path,
+                    file,
+                    hasher: Sha256::new(),
+                    declared_size: header.file_size,
+                    received: 0,
+                });
+            }
+
+            TAG_DATA => {
+                let mut meta_buf = [0u8; 16];
+                recv.read_exact(&mut meta_buf)
+                    .await
+                    .map_err(|e| AppError::Network(format!("读取分片头失败: {}", e)))?;
+
+                let offset = u64::from_be_bytes(meta_buf[0..8].try_into().unwrap());
+                let data_len = u32::from_be_bytes(meta_buf[8..12].try_into().unwrap()) as usize;
+                let crc = u32::from_be_bytes(meta_buf[12..16].try_into().unwrap());
+
+                if data_len > DEFAULT_CHUNK_SIZE as usize {
+                    return Err(AppError::Other("分片过大".to_string()));
+                }
+
+                let mut buf = vec![0u8; data_len];
+                recv.read_exact(&mut buf)
+                    .await
+                    .map_err(|e| AppError::Network(format!("读取分片数据失败: {}", e)))?;
+
+                if calculate_crc32(&buf) != crc {
+                    return Err(AppError::Other("分片校验失败".to_string()));
+                }
+
+                let file = current
+                    .as_mut()
+                    .ok_or_else(|| AppError::Other("收到数据但缺少文件头".to_string()))?;
+
+                file.file.seek(SeekFrom::Start(offset)).await?;
+                file.file.write_all(&buf).await?;
+                file.hasher.update(&buf);
+                file.received += data_len as u64;
+                transferred += data_len as u64;
+
+                limiter.consume_and_wait(data_len as u64).await;
+
+                if let Some(arc) = app_state.transfer_tasks.get(&request.task_id).map(|e| e.value().clone()) {
+                    let mut task = arc.lock().await;
+                    task.update_progress(transferred, 0);
+                }
+            }
+
+            TAG_FILE_END => {
+                let mut has_sha = [0u8; 1];
+                recv.read_exact(&mut has_sha)
+                    .await
+                    .map_err(|e| AppError::Network(format!("读取文件结尾失败: {}", e)))?;
+
+                let mut file = current
+                    .take()
+                    .ok_or_else(|| AppError::Other("收到文件结尾但缺少文件头".to_string()))?;
+
+                if has_sha[0] == 1 {
+                    let mut expected = [0u8; 32];
+                    recv.read_exact(&mut expected)
+                        .await
+                        .map_err(|e| AppError::Network(format!("读取文件摘要失败: {}", e)))?;
+                    let actual = file.hasher.finalize();
+                    if actual.as_slice() != &expected[..] {
+                        return Err(AppError::Other(format!(
+                            "文件校验失败: {}",
+                            file.final_path
+                                .file_name()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_default()
+                        )));
+                    }
+                }
+
+                file.file.flush().await?;
+                file.file.sync_all().await?;
+
+                if file.received != file.declared_size {
+                    return Err(AppError::Other(format!(
+                        "文件大小校验失败：期望 {} 字节，实际 {} 字节",
+                        file.declared_size, file.received
+                    )));
+                }
+
+                drop(file.file);
+                tokio::fs::rename(&file.temp_path, &file.final_path).await?;
+                temp_files.retain(|p| p != &file.temp_path);
+
+                finished_files += 1;
+                log::info!("Received file -> {:?}", file.final_path);
+            }
+
+            other => {
+                return Err(AppError::Other(format!("未知帧标签: {}", other)));
             }
         }
     }
-    Ok(safe)
-}
 
-/// Handle cancel transfer request
-async fn handle_cancel_transfer(
-    message: ControlMessage,
-    app_state: Arc<AppState>,
-) -> AppResult<()> {
-    let task_id: Uuid = message.payload()?;
-
-    if let Some(entry) = app_state.transfer_tasks.get(&task_id) {
-        let mut task = entry.lock().await;
-        task.set_status(TransferStatus::Canceled);
-        log::info!("Transfer task {} canceled", task_id);
+    if let Some(file) = current.take() {
+        return Err(AppError::Other(format!(
+            "文件未完成: {}",
+            file.final_path.to_string_lossy()
+        )));
     }
 
-    // Remove temporary files and resume state; canceled transfers are not resumable.
-    if let Some(storage) = crate::storage::get_storage() {
-        if let Ok(Some(info)) = storage.load_resume_info(task_id) {
-            for file in info.files.values() {
-                let _ = std::fs::remove_file(&file.temp_path);
+    if finished_files != total_files {
+        return Err(AppError::Other(format!(
+            "文件数量不一致：期望 {}，实际 {}",
+            total_files, finished_files
+        )));
+    }
+
+    if transferred != request.total_size {
+        return Err(AppError::Other(format!(
+            "传输总大小不一致：期望 {}，实际 {}",
+            request.total_size, transferred
+        )));
+    }
+
+    Ok(())
+}
+
+/// 暂停时等待，取消时返回错误
+async fn wait_if_paused(app_state: &Arc<AppState>, task_id: uuid::Uuid) -> AppResult<()> {
+    loop {
+        let arc = app_state
+            .transfer_tasks
+            .get(&task_id)
+            .map(|e| e.value().clone());
+
+        let Some(arc) = arc else { return Ok(()) };
+        let task = arc.lock().await;
+
+        match task.status {
+            TransferStatus::Canceled => return Err(AppError::Other("传输已取消".to_string())),
+            TransferStatus::Paused => {
+                drop(task);
+                tokio::time::sleep(Duration::from_millis(100)).await;
             }
+            _ => return Ok(()),
         }
-        let _ = storage.delete_resume_info(task_id);
     }
-
-    Ok(())
 }
 
-/// Handle pause transfer request
-async fn handle_pause_transfer(message: ControlMessage, app_state: Arc<AppState>) -> AppResult<()> {
-    let task_id: Uuid = message.payload()?;
+/// 拼接相对路径，拒绝 `..`、绝对路径与盘符
+fn build_safe_target(base: &Path, header: &FileHeader) -> AppResult<PathBuf> {
+    let mut target = base.to_path_buf();
 
-    if let Some(entry) = app_state.transfer_tasks.get(&task_id) {
-        let mut task = entry.lock().await;
-        task.set_status(TransferStatus::Paused);
-        log::info!("Transfer task {} paused", task_id);
+    for part in header
+        .relative_path
+        .split(['/', '\\'])
+        .filter(|s| !s.is_empty() && *s != ".")
+    {
+        if part == ".." || part.contains(':') {
+            return Err(AppError::Other("非法的相对路径".to_string()));
+        }
+        target.push(part);
     }
 
-    Ok(())
+    let name = header.file_name.trim();
+    if name.is_empty()
+        || name == "."
+        || name == ".."
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains(':')
+    {
+        return Err(AppError::Other("非法的文件名".to_string()));
+    }
+    target.push(name);
+
+    Ok(target)
 }
 
-/// Handle resume transfer request
-async fn handle_resume_transfer(
-    message: ControlMessage,
-    app_state: Arc<AppState>,
-) -> AppResult<()> {
-    let task_id: Uuid = message.payload()?;
-
-    if let Some(entry) = app_state.transfer_tasks.get(&task_id) {
-        let mut task = entry.lock().await;
-        task.set_status(TransferStatus::Transferring);
-        log::info!("Transfer task {} resumed", task_id);
+/// 重名时追加序号，避免覆盖已有文件
+fn unique_path(path: &Path) -> PathBuf {
+    if !path.exists() {
+        return path.to_path_buf();
     }
 
-    Ok(())
+    let parent = path.parent().unwrap_or_else(|| Path::new(""));
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "file".to_string());
+    let ext = path.extension().map(|e| e.to_string_lossy().to_string());
+
+    for index in 1..10000 {
+        let name = match &ext {
+            Some(ext) => format!("{} ({}).{}", stem, index, ext),
+            None => format!("{} ({})", stem, index),
+        };
+        let candidate = parent.join(name);
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+
+    path.to_path_buf()
 }
 
 /// Global QUIC server instance
@@ -905,58 +582,25 @@ static QUIC_SERVER: tokio::sync::OnceCell<QuicServer> = tokio::sync::OnceCell::c
 pub async fn start_quic_server(app_state: Arc<AppState>) -> AppResult<u16> {
     if QUIC_SERVER.get().is_none() {
         let server = QuicServer::new(QUIC_DEFAULT_PORT).await?;
-        QUIC_SERVER.set(server).map_err(|_| {
-            crate::core::AppError::Other("QUIC server already initialized".to_string())
-        })?;
+        let _ = QUIC_SERVER.set(server);
     }
 
     let server = QUIC_SERVER
         .get()
-        .ok_or_else(|| crate::core::AppError::Other("QUIC server unavailable".to_string()))?;
-
+        .ok_or_else(|| AppError::Other("QUIC 服务端初始化失败".to_string()))?;
     let port = server.port();
-    app_state
-        .set_certificate_fingerprint(server.certificate_fingerprint().to_string())
-        .await;
 
-    // Clone the endpoint handle into the accept loop so the loop owns everything
-    // it needs and the global server stays alive for `stop_quic_server`.
-    let endpoint = server.endpoint.clone();
-    let state = app_state.clone();
-    tokio::spawn(async move {
-        if let Err(e) = accept_loop(endpoint, state).await {
-            log::error!("QUIC server error: {}", e);
+    tokio::spawn({
+        let app_state = app_state.clone();
+        async move {
+            if let Err(e) = server.run(app_state).await {
+                log::error!("QUIC server error: {}", e);
+            }
         }
     });
 
     log::info!("QUIC server started on port {}", port);
     Ok(port)
-}
-
-/// Accept incoming connections until the endpoint is closed.
-async fn accept_loop(endpoint: quinn::Endpoint, app_state: Arc<AppState>) -> AppResult<()> {
-    let pool = init_connection_pool().await;
-    log::info!("QUIC server running");
-
-    while let Some(incoming) = endpoint.accept().await {
-        let app_state = app_state.clone();
-        let pool = pool.clone();
-
-        tokio::spawn(async move {
-            match incoming.await {
-                Ok(connection) => {
-                    if let Err(e) = handle_incoming_connection(connection, app_state, pool).await {
-                        log::error!("Connection handler error: {}", e);
-                    }
-                }
-                Err(e) => {
-                    log::error!("Failed to accept connection: {}", e);
-                }
-            }
-        });
-    }
-
-    Ok(())
 }
 
 /// Stop the QUIC server

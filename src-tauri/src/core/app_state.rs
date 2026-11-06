@@ -1,82 +1,74 @@
-use crate::core::MAX_CONCURRENT_TRANSFERS;
+use std::sync::{Arc, Mutex, RwLock};
+use dashmap::DashMap;
+use tokio::sync::Mutex as AsyncMutex;
+use uuid::Uuid;
+use tauri::Emitter;
 use crate::network::DeviceInfo;
 use crate::transfer::TransferTask;
-use dashmap::DashMap;
-use std::sync::Arc;
-use tauri::Emitter;
-use tokio::sync::oneshot;
-use tokio::sync::{Mutex, Semaphore};
-use uuid::Uuid;
 
 #[derive(Debug, Clone)]
 pub struct AppState {
     /// 在线设备列表
     pub devices: Arc<DashMap<Uuid, DeviceInfo>>,
     /// 传输任务列表
-    pub transfer_tasks: Arc<DashMap<Uuid, Arc<Mutex<TransferTask>>>>,
-    /// 设备ID
+    pub transfer_tasks: Arc<DashMap<Uuid, Arc<AsyncMutex<TransferTask>>>>,
+    /// 设备ID（持久化）
     pub device_id: Uuid,
-    /// 设备名称
-    pub device_name: String,
+    /// 设备名称（可在设置中修改，心跳使用最新值）
+    device_name: Arc<RwLock<String>>,
     /// Tauri app handle for emitting events
-    pub app_handle: Arc<Mutex<Option<tauri::AppHandle>>>,
-    /// Incoming transfer requests waiting for a frontend decision.
-    pub pending_transfer_requests: Arc<DashMap<Uuid, oneshot::Sender<bool>>>,
-    /// SHA-256 fingerprint of the local QUIC certificate.
-    pub certificate_fingerprint: Arc<Mutex<Option<String>>>,
-    /// 限制同时进行的发送任务数量。
-    pub transfer_semaphore: Arc<Semaphore>,
+    app_handle: Arc<Mutex<Option<tauri::AppHandle>>>,
 }
 
 impl AppState {
-    pub fn new(device_name: String) -> Self {
+    pub fn new(device_id: Uuid, device_name: String) -> Self {
         Self {
             devices: Arc::new(DashMap::new()),
             transfer_tasks: Arc::new(DashMap::new()),
-            device_id: Uuid::new_v4(),
-            device_name,
+            device_id,
+            device_name: Arc::new(RwLock::new(device_name)),
             app_handle: Arc::new(Mutex::new(None)),
-            pending_transfer_requests: Arc::new(DashMap::new()),
-            certificate_fingerprint: Arc::new(Mutex::new(None)),
-            transfer_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_TRANSFERS)),
         }
     }
 
-    pub async fn set_certificate_fingerprint(&self, fingerprint: String) {
-        self.certificate_fingerprint
-            .lock()
-            .await
-            .replace(fingerprint);
+    /// 当前设备名称
+    pub fn device_name(&self) -> String {
+        self.device_name
+            .read()
+            .map(|n| n.clone())
+            .unwrap_or_else(|_| "我的设备".to_string())
     }
 
-    pub async fn certificate_fingerprint(&self) -> Option<String> {
-        self.certificate_fingerprint.lock().await.clone()
+    /// 更新设备名称
+    pub fn set_device_name(&self, name: String) {
+        if let Ok(mut guard) = self.device_name.write() {
+            *guard = name;
+        }
     }
 
-    /// Set the app handle (startup only; never blocks a runtime thread).
+    /// Set the app handle
     pub fn set_app_handle(&self, handle: tauri::AppHandle) {
-        if let Ok(mut guard) = self.app_handle.try_lock() {
-            guard.replace(handle);
+        if let Ok(mut guard) = self.app_handle.lock() {
+            *guard = Some(handle);
         }
     }
 
-    /// Emit an event to the frontend (async version)
-    pub async fn emit_async<T: serde::Serialize + Clone>(
-        &self,
-        event: &str,
-        payload: T,
-    ) -> crate::core::AppResult<()> {
-        let handle_guard = self.app_handle.lock().await;
-        if let Some(handle) = handle_guard.as_ref() {
-            handle.emit(event, payload).map_err(|e| {
-                crate::core::AppError::Other(format!("Failed to emit event: {}", e))
-            })?;
+    /// Get the app handle
+    pub fn get_app_handle(&self) -> Option<tauri::AppHandle> {
+        self.app_handle.lock().ok().and_then(|g| g.clone())
+    }
+
+    /// Emit an event to the frontend
+    pub fn emit<T: serde::Serialize + Clone>(&self, event: &str, payload: T) -> crate::core::AppResult<()> {
+        if let Some(handle) = self.get_app_handle() {
+            handle.emit(event, payload)
+                .map_err(|e| crate::core::AppError::Other(format!("Failed to emit event: {}", e)))?;
         }
         Ok(())
     }
 
-    /// Get the app handle
-    pub async fn get_app_handle(&self) -> Option<tauri::AppHandle> {
-        self.app_handle.lock().await.clone()
+    /// Emit an event to the frontend (async-compatible alias)
+    pub async fn emit_async<T: serde::Serialize + Clone>(&self, event: &str, payload: T) -> crate::core::AppResult<()> {
+        self.emit(event, payload)
     }
 }

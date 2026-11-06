@@ -1,10 +1,32 @@
-use crate::network::device::{Capability, DeviceInfo, OperatingSystem};
-use serde::{Deserialize, Serialize};
-use std::net::{IpAddr, SocketAddr};
+use serde::{Serialize, Deserialize};
+use std::net::SocketAddr;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use uuid::Uuid;
 
-/// Protocol version for compatibility checking (re-exported from core constants).
-pub use crate::core::constants::PROTOCOL_VERSION;
+use crate::core::{AppError, AppResult, TRANSFER_PROTOCOL_VERSION};
+use crate::network::device::{now_secs, DeviceInfo, OperatingSystem};
+
+/// UDP 发现协议版本（字符串）
+pub const PROTOCOL_VERSION: &str = crate::core::constants::PROTOCOL_VERSION;
+
+/// 控制帧（请求/响应/文件头）最大长度：8MB
+pub const MAX_CONTROL_FRAME_SIZE: usize = 8 * 1024 * 1024;
+
+// ==================== 传输协议 v2 帧标签 ====================
+//
+// 一条双向流内的顺序：
+//   u32 len + bincode(TransferRequest)          <- 发送端
+//   u32 len + bincode(TransferResponse)         <- 接收端
+//   逐个文件：
+//     0x03 + u32 len + bincode(FileHeader)
+//     0x01 + u64 offset + u32 data_len + u32 crc32 + bytes
+//     0x02 + u8 has_sha256 + [32] sha256
+//   0x00                                        <- 全部结束
+//   u8 0x00 (OK) 或 0x01 + u32 len + utf8 错误信息  <- 接收端确认
+pub const TAG_TRANSFER_END: u8 = 0x00;
+pub const TAG_DATA: u8 = 0x01;
+pub const TAG_FILE_END: u8 = 0x02;
+pub const TAG_FILE_HEADER: u8 = 0x03;
 
 /// Discovery message types
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -20,38 +42,25 @@ pub enum DiscoveryMessageType {
 /// Device discovery packet sent over UDP
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiscoveryPacket {
-    /// Message type
     pub message_type: DiscoveryMessageType,
-    /// Protocol version
     pub protocol_version: String,
-    /// Device unique ID
     pub device_id: Uuid,
-    /// Device display name
     pub device_name: String,
-    /// Operating system
     pub os: OperatingSystem,
-    /// IP address (can be overridden by sender socket addr)
-    pub ip_address: Option<IpAddr>,
-    /// QUIC service port
+    pub ip_address: Option<std::net::IpAddr>,
     pub quic_port: u16,
-    /// Device capabilities
-    pub capabilities: Vec<Capability>,
-    /// SHA-256 fingerprint of the device's QUIC certificate
-    pub cert_fingerprint: String,
-    /// Timestamp when packet was sent
+    pub capabilities: Vec<crate::network::device::Capability>,
     pub timestamp: u64,
 }
 
 impl DiscoveryPacket {
-    /// Create a new announcement packet
     pub fn announce(
         device_id: Uuid,
         device_name: String,
         os: OperatingSystem,
-        ip_address: Option<IpAddr>,
+        ip_address: Option<std::net::IpAddr>,
         quic_port: u16,
-        capabilities: Vec<Capability>,
-        cert_fingerprint: String,
+        capabilities: Vec<crate::network::device::Capability>,
     ) -> Self {
         Self {
             message_type: DiscoveryMessageType::Announce,
@@ -62,15 +71,10 @@ impl DiscoveryPacket {
             ip_address,
             quic_port,
             capabilities,
-            cert_fingerprint,
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
+            timestamp: now_secs(),
         }
     }
 
-    /// Create a response packet
     pub fn response(&self, local_device: &DeviceInfo) -> Self {
         Self {
             message_type: DiscoveryMessageType::Response,
@@ -78,25 +82,14 @@ impl DiscoveryPacket {
             device_id: local_device.device_id,
             device_name: local_device.device_name.clone(),
             os: local_device.os.clone(),
-            ip_address: None, // Will be determined from socket
+            ip_address: None,
             quic_port: local_device.quic_port,
             capabilities: local_device.capabilities.clone(),
-            cert_fingerprint: local_device.cert_fingerprint.clone(),
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
+            timestamp: now_secs(),
         }
     }
 
-    /// Create a goodbye packet
-    pub fn goodbye(
-        device_id: Uuid,
-        device_name: String,
-        os: OperatingSystem,
-        quic_port: u16,
-        cert_fingerprint: String,
-    ) -> Self {
+    pub fn goodbye(device_id: Uuid, device_name: String, os: OperatingSystem, quic_port: u16) -> Self {
         Self {
             message_type: DiscoveryMessageType::Goodbye,
             protocol_version: PROTOCOL_VERSION.to_string(),
@@ -106,25 +99,18 @@ impl DiscoveryPacket {
             ip_address: None,
             quic_port,
             capabilities: vec![],
-            cert_fingerprint,
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
+            timestamp: now_secs(),
         }
     }
 
-    /// Serialize to bytes using bincode
-    pub fn to_bytes(&self) -> crate::core::AppResult<Vec<u8>> {
+    pub fn to_bytes(&self) -> AppResult<Vec<u8>> {
         Ok(bincode::serialize(self)?)
     }
 
-    /// Deserialize from bytes
-    pub fn from_bytes(data: &[u8]) -> crate::core::AppResult<Self> {
+    pub fn from_bytes(data: &[u8]) -> AppResult<Self> {
         Ok(bincode::deserialize(data)?)
     }
 
-    /// Convert to DeviceInfo using socket address for IP
     pub fn to_device_info(&self, socket_addr: SocketAddr) -> DeviceInfo {
         let ip = self.ip_address.unwrap_or(socket_addr.ip());
         DeviceInfo {
@@ -135,233 +121,124 @@ impl DiscoveryPacket {
             quic_port: self.quic_port,
             protocol_version: self.protocol_version.clone(),
             capabilities: self.capabilities.clone(),
-            last_seen: std::time::SystemTime::now(),
-            cert_fingerprint: self.cert_fingerprint.clone(),
+            last_seen: now_secs(),
         }
     }
 }
 
-/// Control message types for QUIC connections
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum ControlMessageType {
-    /// Authentication handshake - Hello
-    AuthHello,
-    /// Authentication handshake - Response with certificate fingerprint
-    AuthResponse,
-    /// Authentication handshake - Acknowledge
-    AuthAck,
-    /// File transfer request
-    TransferRequest,
-    /// File transfer response (accept/reject)
-    TransferResponse,
-    /// Starts a file data stream on an authenticated connection
-    DataTransferStart,
-    /// Receiver response describing which chunks are still required
-    DataTransferReady,
-    /// Cancel ongoing transfer
-    CancelTransfer,
-    /// Pause transfer
-    PauseTransfer,
-    /// Resume transfer
-    ResumeTransfer,
-}
+// ==================== 传输协议 v2 ====================
 
-/// Authentication hello message
+/// 文件元数据（请求中携带）
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AuthHello {
-    /// Device ID
-    pub device_id: Uuid,
-    /// Device name
-    pub device_name: String,
-    /// Protocol version
-    pub protocol_version: String,
-    /// Certificate fingerprint (SHA-256) of the sender
-    pub cert_fingerprint: String,
-    /// Random nonce for challenge-response
-    pub nonce: Vec<u8>,
-}
-
-/// Authentication response message
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AuthResponse {
-    /// Device ID
-    pub device_id: Uuid,
-    /// Device name
-    pub device_name: String,
-    /// Certificate fingerprint (SHA-256)
-    pub cert_fingerprint: String,
-    /// Signature of the nonce from AuthHello
-    pub signature: Vec<u8>,
-    /// Random nonce for challenge-response
-    pub nonce: Vec<u8>,
-}
-
-/// Authentication acknowledge message
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AuthAck {
-    /// Device ID
-    pub device_id: Uuid,
-    /// Signature of the nonce from AuthResponse
-    pub signature: Vec<u8>,
-    /// Authentication result
-    pub authenticated: bool,
-    /// Error message if authentication failed
-    pub error: Option<String>,
-}
-
-/// File metadata for transfer
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FileMetadata {
-    /// Unique file ID within transfer
+pub struct FileMeta {
     pub file_id: u64,
-    /// Relative path (for folder transfers)
+    /// 相对目录（可为空），用于保留目录结构
     pub relative_path: String,
-    /// File name
-    pub file_name: String,
-    /// File size in bytes
-    pub file_size: u64,
-    /// File modification time (Unix timestamp)
-    pub modified_time: u64,
-    /// File checksum (SHA-256)
-    pub checksum: Option<String>,
-    /// Is directory
-    pub is_directory: bool,
-    /// Source file path (for sender, not transmitted)
-    #[serde(skip)]
-    pub source_path: String,
-}
-
-/// Per-file header sent at the beginning of each file's data section.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FileHeader {
-    pub task_id: Uuid,
-    pub file_id: u64,
     pub file_name: String,
     pub file_size: u64,
-    pub relative_path: String,
-    pub checksum: Option<String>,
 }
 
-/// Transfer request message
+/// 传输请求
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransferRequest {
-    /// Transfer task ID
+    pub protocol_version: u16,
     pub task_id: Uuid,
-    /// Sender device ID
     pub sender_id: Uuid,
-    /// Sender device name
     pub sender_name: String,
-    /// Total number of files
-    pub file_count: u32,
-    /// Total size in bytes
     pub total_size: u64,
-    /// Files to transfer
-    pub files: Vec<FileMetadata>,
-    /// Resume from existing transfer
-    pub resume: bool,
+    pub files: Vec<FileMeta>,
 }
 
-/// Transfer response message
+impl TransferRequest {
+    pub fn new(
+        task_id: Uuid,
+        sender_id: Uuid,
+        sender_name: String,
+        total_size: u64,
+        files: Vec<FileMeta>,
+    ) -> Self {
+        Self {
+            protocol_version: TRANSFER_PROTOCOL_VERSION,
+            task_id,
+            sender_id,
+            sender_name,
+            total_size,
+            files,
+        }
+    }
+}
+
+/// 传输响应
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransferResponse {
-    /// Transfer task ID
     pub task_id: Uuid,
-    /// Accepted or rejected
     pub accepted: bool,
-    /// Rejection reason (if rejected)
     pub reason: Option<String>,
-    /// Suggested save path
     pub save_path: Option<String>,
 }
 
-/// Starts a data stream after a transfer request has been accepted.
+/// 每个文件开始前的文件头
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DataTransferStart {
-    pub task_id: Uuid,
-    pub files: Vec<FileMetadata>,
-    pub resume: bool,
-}
-
-/// Receiver response for a data stream. Missing chunks are indexed per file.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DataTransferReady {
-    pub task_id: Uuid,
-    pub accepted: bool,
-    pub reason: Option<String>,
-    pub missing_chunks: std::collections::HashMap<u64, Vec<u64>>,
-}
-
-/// Chunk metadata for data transfer
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChunkMetadata {
-    /// Transfer task ID
-    pub task_id: Uuid,
-    /// File ID
+pub struct FileHeader {
     pub file_id: u64,
-    /// Chunk index (0-based)
-    pub chunk_index: u64,
-    /// Total chunks for this file
-    pub total_chunks: u64,
-    /// Chunk size
-    pub chunk_size: u32,
-    /// Chunk offset in file
-    pub offset: u64,
-    /// Chunk checksum (CRC32)
-    pub checksum: u32,
+    pub file_name: String,
+    pub relative_path: String,
+    pub file_size: u64,
 }
 
-/// Control message envelope
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ControlMessage {
-    /// Protocol version
-    pub protocol_version: String,
-    /// Message type
-    pub message_type: ControlMessageType,
-    /// Payload (type-specific serialized data)
-    pub payload: Vec<u8>,
+// ==================== 帧读写辅助 ====================
+
+/// 写一个长度前缀帧（u32 大端 + payload）
+pub async fn write_frame<W: AsyncWrite + Unpin>(writer: &mut W, payload: &[u8]) -> AppResult<()> {
+    if payload.len() > MAX_CONTROL_FRAME_SIZE {
+        return Err(AppError::Other("控制帧过大".to_string()));
+    }
+    writer
+        .write_all(&(payload.len() as u32).to_be_bytes())
+        .await
+        .map_err(|e| AppError::Network(format!("写入长度失败: {}", e)))?;
+    writer
+        .write_all(payload)
+        .await
+        .map_err(|e| AppError::Network(format!("写入数据失败: {}", e)))?;
+    Ok(())
 }
 
-impl ControlMessage {
-    /// Create a new control message
-    pub fn new<T: Serialize>(
-        message_type: ControlMessageType,
-        payload: &T,
-    ) -> crate::core::AppResult<Self> {
-        Ok(Self {
-            protocol_version: PROTOCOL_VERSION.to_string(),
-            message_type,
-            payload: bincode::serialize(payload)?,
-        })
+/// 读一个长度前缀帧，超长直接报错
+pub async fn read_frame<R: AsyncRead + Unpin>(reader: &mut R, max_len: usize) -> AppResult<Vec<u8>> {
+    let mut len_buf = [0u8; 4];
+    reader
+        .read_exact(&mut len_buf)
+        .await
+        .map_err(|e| AppError::Network(format!("读取长度失败: {}", e)))?;
+    let len = u32::from_be_bytes(len_buf) as usize;
+    if len > max_len {
+        return Err(AppError::Other(format!("帧过大: {} 字节", len)));
     }
-
-    /// Deserialize payload
-    pub fn payload<T: for<'de> Deserialize<'de>>(&self) -> crate::core::AppResult<T> {
-        Ok(bincode::deserialize(&self.payload)?)
-    }
-
-    /// Serialize to bytes
-    pub fn to_bytes(&self) -> crate::core::AppResult<Vec<u8>> {
-        Ok(bincode::serialize(self)?)
-    }
-
-    /// Deserialize from bytes and reject incompatible protocol versions.
-    pub fn from_bytes(data: &[u8]) -> crate::core::AppResult<Self> {
-        let message: Self = bincode::deserialize(data)?;
-        if message.protocol_version != PROTOCOL_VERSION {
-            return Err(crate::core::AppError::Other(format!(
-                "Incompatible control protocol version: {} (expected {})",
-                message.protocol_version, PROTOCOL_VERSION
-            )));
-        }
-        Ok(message)
-    }
+    let mut buf = vec![0u8; len];
+    reader
+        .read_exact(&mut buf)
+        .await
+        .map_err(|e| AppError::Network(format!("读取数据失败: {}", e)))?;
+    Ok(buf)
 }
 
-/// Data packet for file chunks
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DataPacket {
-    /// Chunk metadata
-    pub metadata: ChunkMetadata,
-    /// Actual data (may be empty for metadata-only packets)
-    pub data: Vec<u8>,
+/// 写序列化帧
+pub async fn write_serialized<W, T>(writer: &mut W, value: &T) -> AppResult<()>
+where
+    W: AsyncWrite + Unpin,
+    T: Serialize,
+{
+    let data = bincode::serialize(value)?;
+    write_frame(writer, &data).await
+}
+
+/// 读并反序列化帧
+pub async fn read_serialized<R, T>(reader: &mut R, max_len: usize) -> AppResult<T>
+where
+    R: AsyncRead + Unpin,
+    T: for<'de> Deserialize<'de>,
+{
+    let data = read_frame(reader, max_len).await?;
+    Ok(bincode::deserialize(&data)?)
 }

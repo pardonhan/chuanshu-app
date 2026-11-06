@@ -1,13 +1,12 @@
 import { useEffect, useCallback } from 'react'
 import { List, Progress, Button, Space, Tag, Empty } from 'antd'
-import { PauseOutlined, PlayCircleOutlined, CloseOutlined, FolderOpenOutlined } from '@ant-design/icons'
+import { PauseOutlined, PlayCircleOutlined, CloseOutlined } from '@ant-design/icons'
 import { useTransferStore } from '../../store/useTransferStore'
 import {
   getTransferTasks,
   cancelTransfer,
   pauseTransfer,
   resumeTransfer,
-  openFileLocation,
   onTransferProgress,
   onTransferCompleted,
   onTransferFailed,
@@ -21,7 +20,7 @@ export default function TransferList() {
     tasks,
     isLoading,
     setTasks,
-    upsertTask,
+    updateTaskProgress,
     setTaskStatus,
     setLoading
   } = useTransferStore()
@@ -49,7 +48,7 @@ export default function TransferList() {
 
     const setupListeners = async () => {
       unlistenProgress = await onTransferProgress((task: TransferTaskInfo) => {
-        upsertTask(task)
+        updateTaskProgress(task.task_id, task.progress, task.speed, task.transferred_size)
       })
 
       unlistenCompleted = await onTransferCompleted((taskId: string) => {
@@ -57,20 +56,24 @@ export default function TransferList() {
         loadTasks()
       })
 
-      unlistenFailed = await onTransferFailed(({ task_id }: { task_id: string; error: string }) => {
-        setTaskStatus(task_id, 'Failed')
+      unlistenFailed = await onTransferFailed(({ taskId }: { taskId: string; error: string }) => {
+        setTaskStatus(taskId, 'Failed')
         loadTasks()
       })
     }
 
     setupListeners()
 
+    // Poll for updates every 2 seconds
+    const interval = setInterval(loadTasks, 2000)
+
     return () => {
+      clearInterval(interval)
       unlistenProgress?.()
       unlistenCompleted?.()
       unlistenFailed?.()
     }
-  }, [loadTasks, upsertTask, setTaskStatus])
+  }, [loadTasks, updateTaskProgress, setTaskStatus])
 
   const handlePause = async (taskId: string) => {
     try {
@@ -154,18 +157,6 @@ export default function TransferList() {
                     size="small"
                     danger
                     onClick={() => handleCancel(task.task_id)}
-                  />
-                ),
-                task.status === 'Completed' && task.save_path && (
-                  <Button
-                    type="text"
-                    icon={<FolderOpenOutlined />}
-                    size="small"
-                    onClick={() => {
-                      openFileLocation(task.save_path as string).catch((error) =>
-                        console.error('Failed to open file location:', error)
-                      )
-                    }}
                   />
                 ),
               ].filter(Boolean)}

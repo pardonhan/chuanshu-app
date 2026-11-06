@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Card, Form, Input, Switch, Select, Button, Space, Divider, message, Row, Col, Slider } from 'antd'
 import { SaveOutlined, FolderOutlined, ReloadOutlined } from '@ant-design/icons'
-import { getSettings, saveSettings, type Settings, getSystemInfo, type SystemInfo, getAutoLaunch, setAutoLaunch as setAutoLaunchApi } from '../services/tauriApi'
+import { getSettings, saveSettings, type Settings, getSystemInfo, type SystemInfo, getAutoLaunch, setAutoLaunch as setAutoLaunchApi, getLocalDeviceInfo, type LocalDeviceInfo } from '../services/tauriApi'
 import { open } from '@tauri-apps/plugin-dialog'
 
 const { Option } = Select
@@ -39,13 +39,23 @@ export default function SettingsPage() {
   const [isLoading, setIsLoading] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
   const [systemInfo, setSystemInfo] = useState<SystemInfo | null>(null)
+  const [localDevice, setLocalDevice] = useState<LocalDeviceInfo | null>(null)
   const [autoLaunch, setAutoLaunch] = useState(false)
 
   useEffect(() => {
     loadSystemInfo()
     loadAutoLaunch()
+    loadLocalDevice()
     loadSettings()
   }, [])
+
+  const loadLocalDevice = async () => {
+    try {
+      setLocalDevice(await getLocalDeviceInfo())
+    } catch (error) {
+      console.error('Failed to load local device info:', error)
+    }
+  }
 
   const loadSystemInfo = async () => {
     try {
@@ -155,7 +165,7 @@ export default function SettingsPage() {
         initialValues={{
           upload_limit: 0,
           download_limit: 0,
-          auto_accept: false,
+          auto_accept: true,
           enable_notification: true,
           theme: 'auto',
         }}
@@ -208,6 +218,10 @@ export default function SettingsPage() {
 
         <Form.Item label="系统信息" extra={<span style={{ color: '#999', fontSize: '12px' }}>{getSystemLabel()}</span>}>
           <Input disabled value={getSystemLabel()} />
+        </Form.Item>
+
+        <Form.Item label="本机设备 ID" extra={<span style={{ color: '#999', fontSize: '12px' }}>局域网内唯一标识本设备，重启后保持不变</span>}>
+          <Input disabled value={localDevice?.device_id || '加载中...'} />
         </Form.Item>
 
         <div style={{ marginBottom: 16, fontSize: 16, fontWeight: 500, borderBottom: '1px solid #e8e8e8', paddingBottom: 8 }}>
@@ -316,10 +330,18 @@ export default function SettingsPage() {
           <Col span={12}>
             <p><strong>温馨提示：</strong></p>
             <ul style={{ margin: 0, paddingLeft: 20 }}>
-              <li>设备名称修改后需要重启应用生效</li>
+              <li>设备名称保存后立即生效，无需重启</li>
               <li>下载路径可以随时修改，不影响已进行的传输</li>
               <li>速度限制仅对新的传输任务生效</li>
               <li>Windows 和 macOS 的开机自启机制不同，请确保应用安装在系统盘</li>
+            </ul>
+          </Col>
+          <Col span={12}>
+            <p><strong>快捷键：</strong></p>
+            <ul style={{ margin: 0, paddingLeft: 20 }}>
+              <li>Ctrl/Cmd + V：粘贴文件路径</li>
+              <li>Ctrl/Cmd + R：刷新设备列表</li>
+              <li>Ctrl/Cmd + ,：打开设置</li>
             </ul>
           </Col>
         </Row>

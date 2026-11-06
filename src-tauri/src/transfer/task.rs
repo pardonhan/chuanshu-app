@@ -1,9 +1,8 @@
-use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use serde::{Serialize, Deserialize};
 use std::time::SystemTime;
 use uuid::Uuid;
 
-use crate::network::protocol::FileMetadata;
+use crate::network::protocol::FileMeta;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum TransferStatus {
@@ -31,15 +30,13 @@ pub struct TransferTask {
     pub total_size: u64,
     pub transferred_size: u64,
     pub file_count: u32,
-    pub files: Vec<FileMetadata>,
+    pub files: Vec<FileMeta>,
     pub current_file_index: u32,
     pub current_file: String,
     pub speed: u64,
     pub error_message: Option<String>,
     pub created_at: SystemTime,
     pub updated_at: SystemTime,
-    pub save_path: Option<PathBuf>,
-    pub source_paths: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -56,8 +53,6 @@ pub struct TransferTaskInfo {
     pub progress: f64,
     pub error_message: Option<String>,
     pub created_at: u64,
-    /// Destination path, available for completed receive tasks.
-    pub save_path: Option<String>,
 }
 
 impl TransferTask {
@@ -86,8 +81,6 @@ impl TransferTask {
             error_message: None,
             created_at: now,
             updated_at: now,
-            save_path: None,
-            source_paths: Vec::new(),
         }
     }
 
@@ -125,8 +118,7 @@ impl TransferTask {
 
 impl From<&TransferTask> for TransferTaskInfo {
     fn from(task: &TransferTask) -> Self {
-        let created_at = task
-            .created_at
+        let created_at = task.created_at
             .duration_since(SystemTime::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
@@ -144,10 +136,6 @@ impl From<&TransferTask> for TransferTaskInfo {
             progress: task.progress(),
             error_message: task.error_message.clone(),
             created_at,
-            save_path: task
-                .save_path
-                .as_ref()
-                .map(|path| path.to_string_lossy().to_string()),
         }
     }
 }
