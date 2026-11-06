@@ -35,7 +35,7 @@
   - 警告：#F59E0B
   - 错误：#EF4444
   - 信息：#3B82F6
-- **Dark mode:** 未实现
+- **Dark mode:** antd `darkAlgorithm` 已实现，设置页可切换 auto/light/dark；部分写死颜色仍未适配
 
 ## Spacing
 - **Base unit:** 4px (Ant Design 基础单位)

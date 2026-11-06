@@ -6,7 +6,8 @@
 
 ### 设备发现与连接
 
-- **自动发现**：基于 UDP 广播的设备自动发现协议，3 秒心跳间隔，9 秒超时检测
+- **自动发现**：基于 UDP 广播的设备自动发现协议，3 秒心跳间隔，30 秒超时检测
+- **跨子网发现**：每 10 秒对已知设备做定向探测
 - **手动发现**：支持通过输入 IP 地址主动探测指定设备
 - **设备列表**：实时显示在线设备，支持刷新和选择
 - **跨平台**：支持 Windows、macOS、Linux 设备互相发现和通信
@@ -16,8 +17,8 @@
 - **单文件/多文件传输**：支持选择单个或多个文件进行发送
 - **文件夹传输**：支持整个文件夹的传输，保持目录结构
 - **拖拽发送**：支持拖拽文件到传输区域快速发起传输
-- **并发传输**：最大支持 5 个并发传输任务
-- **断点续传**：支持传输中断后恢复（需双方支持）
+- **并发传输**：最大支持 5 个并发传输任务（超出排队）
+- **断点续传**：支持传输中断后恢复（元数据不一致时自动全量重传）
 
 ### 传输管理
 
@@ -29,9 +30,9 @@
 ### 技术特性
 
 - **QUIC 协议**：基于 QUIC 协议的高效数据传输
-- **分块传输**：4MB 块大小，支持大文件分块
-- **校验和**：小文件（<100MB）自动计算 SHA-256 校验和
-- **自签名证书**：自动生成本地 TLS 证书保证传输安全
+- **分块传输**：按文件大小自适应块大小（64KB–8MB）
+- **校验和**：小文件（<100MB）计算 SHA-256 整文件校验，分片使用 CRC32
+- **证书固定**：自签名证书的 SHA-256 指纹随发现包广播，客户端按指纹校验对端
 
 ## 技术架构
 
@@ -57,13 +58,14 @@
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | message_type | DiscoveryMessageType | Announce/Response/Goodbye |
-| protocol_version | String | 协议版本 (1.0.0) |
+| protocol_version | String | 协议版本 (1.1.0) |
 | device_id | Uuid | 设备唯一标识 |
 | device_name | String | 设备显示名称 |
 | os | OperatingSystem | 操作系统类型 |
 | ip_address | Option<IpAddr> | IP 地址 |
 | quic_port | u16 | QUIC 服务端口 |
 | capabilities | Vec<Capability> | 设备能力列表 |
+| cert_fingerprint | String | QUIC 证书 SHA-256 指纹 |
 | timestamp | u64 | 时间戳 |
 
 #### 文件传输协议
@@ -159,14 +161,20 @@ pnpm tauri build
 | 命令 | 参数 | 返回值 | 说明 |
 |------|------|--------|------|
 | `get_device_list` | - | `Vec<DeviceInfo>` | 获取在线设备列表 |
+| `get_known_devices` | - | `Vec<KnownDevice>` | 获取全部已知设备（含离线） |
+| `delete_known_device` | `device_id: String` | `()` | 删除已知设备 |
 | `discover_device_by_ip` | `ip: String` | `Option<DeviceInfo>` | 通过 IP 发现设备 |
 | `get_transfer_tasks` | - | `Vec<TransferTaskInfo>` | 获取传输任务列表 |
 | `send_files` | `SendFilesRequest` | `Vec<Uuid>` | 发送文件 |
-| `cancel_transfer` | `task_id: Uuid` | `()` | 取消传输 |
-| `pause_transfer` | `task_id: Uuid` | `()` | 暂停传输 |
-| `resume_transfer` | `task_id: Uuid` | `()` | 恢复传输 |
-| `get_settings` | - | `Settings` | 获取设置 |
-| `save_settings` | `Settings` | `()` | 保存设置 |
+| `resend_files` | `device_ids, file_paths` | `Vec<String>` | 从历史记录重新发送 |
+| `cancel_transfer` / `pause_transfer` / `resume_transfer` | `task_id: Uuid` | `()` | 取消 / 暂停 / 恢复传输 |
+| `accept_transfer_request` / `reject_transfer_request` | `task_id: Uuid` | `()` | 接受 / 拒绝接收请求 |
+| `get_settings` / `save_settings` | - / `Settings` | `Settings` / `()` | 读取 / 保存设置 |
+| `get_transfer_history` | `TransferHistoryQuery` | `Vec<TransferHistoryEntry>` | 分页查询历史 |
+| `clear_transfer_history` | - | `()` | 清空历史 |
+| `get_system_info` | - | `SystemInfo` | 系统信息 |
+| `set_auto_launch` / `get_auto_launch` | `enabled: bool` / - | `()` / `bool` | 开机自启 |
+| `open_file_location` | `file_path: String` | `()` | 打开文件所在目录 |
 
 ## 配置说明
 
@@ -189,7 +197,14 @@ pnpm tauri build
 
 ### 超时配置
 - **DISCOVERY_HEARTBEAT_INTERVAL**: 3 秒
-- **DISCOVERY_TIMEOUT**: 9 秒
+- **DISCOVERY_TIMEOUT**: 30 秒
+- **DISCOVERY_REJOIN_TIMEOUT**: 25 秒
+- **QUIC_IDLE_TIMEOUT**: 60 秒
+- **QUIC_KEEP_ALIVE_INTERVAL**: 15 秒
+
+### 并发与协议
+- **MAX_CONCURRENT_TRANSFERS**: 5（超出排队）
+- **PROTOCOL_VERSION**: 1.1.0（与 1.0.0 不兼容）
 
 ## 设备能力
 

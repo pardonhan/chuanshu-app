@@ -27,8 +27,6 @@
     "@tauri-apps/plugin-shell": "^2.3.5",
     "antd": "^6.3.3",
     "autoprefixer": "^10.4.27",
-    "clsx": "^2.1.1",
-    "dayjs": "^1.11.20",
     "filesize": "^11.0.13",
     "postcss": "^8.5.8",
     "tailwindcss": "^4.2.2",

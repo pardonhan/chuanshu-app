@@ -26,8 +26,8 @@ pnpm tauri build  # 构建 Tauri 应用
 
 ### 清理依赖
 ```bash
-pnpm clean        # 清理 node_modules 和 pnpm-lock.yaml
-pnpm install      # 重新安装
+rm -rf node_modules pnpm-lock.yaml  # macOS / Linux；Windows 使用资源管理器删除
+pnpm install                        # 重新安装
 ```
 
 ## 开发规范

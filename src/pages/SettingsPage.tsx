@@ -322,14 +322,6 @@ export default function SettingsPage() {
               <li>Windows 和 macOS 的开机自启机制不同，请确保应用安装在系统盘</li>
             </ul>
           </Col>
-          <Col span={12}>
-            <p><strong>快捷键：</strong></p>
-            <ul style={{ margin: 0, paddingLeft: 20 }}>
-              <li>Ctrl/Cmd + V：粘贴文件路径</li>
-              <li>Ctrl/Cmd + R：刷新设备列表</li>
-              <li>Ctrl/Cmd + ,：打开设置</li>
-            </ul>
-          </Col>
         </Row>
       </div>
     </Card>
