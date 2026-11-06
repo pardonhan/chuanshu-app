@@ -61,6 +61,7 @@ export default function DeviceList({ selectedDeviceId, onSelectDevice }: DeviceL
       const device = await discoverDeviceByIp(inputIp.trim())
       if (device) {
         message.success(`发现设备：${device.device_name}`)
+        loadDevices()
       } else {
         message.warning('未发现设备，请检查 IP 地址是否正确')
       }
@@ -91,11 +92,7 @@ export default function DeviceList({ selectedDeviceId, onSelectDevice }: DeviceL
 
     setupListeners()
 
-    // Poll for updates every 5 seconds as fallback
-    const interval = setInterval(loadDevices, 5000)
-
     return () => {
-      clearInterval(interval)
       unlistenOnline?.()
       unlistenOffline?.()
     }

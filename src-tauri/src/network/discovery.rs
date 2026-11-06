@@ -6,12 +6,15 @@ use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 use tokio::time::interval;
 use uuid::Uuid;
-use quinn::Endpoint;
 
-use crate::core::{AppResult, AppError, AppState, DISCOVERY_HEARTBEAT_INTERVAL, DISCOVERY_PORT, DISCOVERY_TIMEOUT, QUIC_IDLE_TIMEOUT};
+use crate::core::{
+    AppError, AppResult, AppState, DISCOVERY_HEARTBEAT_INTERVAL, DISCOVERY_PORT,
+    DISCOVERY_REJOIN_TIMEOUT, DISCOVERY_TIMEOUT,
+};
+use crate::network::auth::authenticate_as_client;
+use crate::network::connection::get_connection_pool;
 use crate::network::device::{Capability, DeviceInfo, OperatingSystem};
 use crate::network::protocol::DiscoveryPacket;
-use crate::network::connection::get_connection_pool;
 use crate::storage::get_storage;
 
 /// Event name for device list updates
@@ -28,25 +31,29 @@ pub struct DiscoveryService {
     quic_port: u16,
     /// Whether service is running
     running: Arc<Mutex<bool>>,
+    /// Local QUIC certificate fingerprint
+    cert_fingerprint: String,
 }
 
 impl DiscoveryService {
     /// Create a new discovery service
-    pub fn new(device_id: Uuid, device_name: String, quic_port: u16) -> Self {
+    pub fn new(
+        device_id: Uuid,
+        device_name: String,
+        quic_port: u16,
+        cert_fingerprint: String,
+    ) -> Self {
         Self {
             device_id,
             device_name,
             quic_port,
             running: Arc::new(Mutex::new(false)),
+            cert_fingerprint,
         }
     }
 
     /// Start the discovery service
-    pub async fn start(
-        &self,
-        app_state: Arc<AppState>,
-        app_handle: AppHandle,
-    ) -> AppResult<()> {
+    pub async fn start(&self, app_state: Arc<AppState>, app_handle: AppHandle) -> AppResult<()> {
         let mut running = self.running.lock().await;
         if *running {
             return Ok(());
@@ -76,6 +83,7 @@ impl DiscoveryService {
         let device_id = self.device_id;
         let device_name = self.device_name.clone();
         let quic_port = self.quic_port;
+        let cert_fingerprint = self.cert_fingerprint.clone();
         let running_clone = Arc::clone(&self.running);
         let socket_clone = Arc::clone(&socket_arc);
 
@@ -98,10 +106,10 @@ impl DiscoveryService {
                     None, // IP will be determined by receiver
                     quic_port,
                     capabilities.clone(),
+                    cert_fingerprint.clone(),
                 );
 
-                if let Err(e) = broadcast_discovery_packet(&socket_clone,&packet,
-                ).await {
+                if let Err(e) = broadcast_discovery_packet(&socket_clone, &packet).await {
                     log::debug!("Failed to broadcast discovery: {}", e);
                 }
             }
@@ -127,7 +135,9 @@ impl DiscoveryService {
                             &app_state_clone,
                             &app_handle_clone,
                             &socket_clone,
-                        ).await {
+                        )
+                        .await
+                        {
                             log::debug!("Failed to handle discovery packet: {}", e);
                         }
                     }
@@ -156,6 +166,7 @@ impl DiscoveryService {
         let device_id = self.device_id;
         let device_name = self.device_name.clone();
         let quic_port = self.quic_port;
+        let cert_fingerprint = self.cert_fingerprint.clone();
         let running_clone = Arc::clone(&self.running);
         let app_state_clone = app_state.clone();
         let app_handle_clone = app_handle.clone();
@@ -172,10 +183,12 @@ impl DiscoveryService {
                     device_id,
                     device_name.clone(),
                     quic_port,
+                    cert_fingerprint.clone(),
                     Arc::clone(&running_clone),
                     app_state_clone.clone(),
-                    app_handle_clone.clone()
-                ).await;
+                    app_handle_clone.clone(),
+                )
+                .await;
                 interval.tick().await;
             }
         });
@@ -196,6 +209,7 @@ impl DiscoveryService {
             self.device_name.clone(),
             os,
             self.quic_port,
+            self.cert_fingerprint.clone(),
         );
 
         if let Ok(data) = packet.to_bytes() {
@@ -282,9 +296,10 @@ fn check_device_was_offline(
     }
 
     if let Some(device) = devices.get(device_id) {
-        let elapsed = SystemTime::now().duration_since(device.value().last_seen)
+        let elapsed = SystemTime::now()
+            .duration_since(device.value().last_seen)
             .unwrap_or(Duration::from_secs(999));
-        return elapsed > Duration::from_secs(25);
+        return elapsed > Duration::from_secs(DISCOVERY_REJOIN_TIMEOUT);
     }
 
     true
@@ -295,13 +310,16 @@ fn spawn_quic_connection_task(
     device_id: Uuid,
     addr: SocketAddr,
     device_info: DeviceInfo,
-    _app_state: Arc<AppState>,
+    app_state: Arc<AppState>,
     app_handle: AppHandle,
 ) {
     tokio::spawn(async move {
-        log::info!("Establishing QUIC keep-alive connection to {} ({})", device_info.device_name, addr);
+        log::info!(
+            "Establishing QUIC connection to {} ({})",
+            device_info.device_name,
+            addr
+        );
 
-        // Get connection pool
         let pool = match get_connection_pool() {
             Some(p) => p,
             None => {
@@ -310,82 +328,71 @@ fn spawn_quic_connection_task(
             }
         };
 
-        // Create QUIC client endpoint
-        let client_config = match crate::network::connection::create_client_config() {
+        let client = match crate::network::quic_client::get_shared_client().await {
             Ok(c) => c,
             Err(e) => {
-                log::warn!("Failed to create client config: {}", e);
+                log::warn!("Failed to create QUIC client: {}", e);
                 return;
             }
         };
 
-        let bind_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
-        let mut endpoint = match Endpoint::client(bind_addr) {
-            Ok(e) => e,
-            Err(e) => {
-                log::warn!("Failed to create endpoint: {}", e);
-                return;
-            }
-        };
-        endpoint.set_default_client_config(client_config);
-
-        // Connect to peer
-        let connect_result = endpoint.connect(addr, "chuanshu.local");
-        let connecting = match connect_result {
+        let peer_conn = match client
+            .connect(device_id, addr, Some(device_info.cert_fingerprint.clone()))
+            .await
+        {
             Ok(c) => c,
             Err(e) => {
-                log::debug!("Failed to initiate connection to {}: {}", addr, e);
-                return;
-            }
-        };
-
-        let connection = match tokio::time::timeout(Duration::from_secs(5), connecting).await {
-            Ok(Ok(conn)) => conn,
-            Ok(Err(e)) => {
                 log::debug!("Failed to connect to {}: {}", addr, e);
                 return;
             }
-            Err(_) => {
-                log::debug!("Connection timeout to {}", addr);
-                return;
-            }
         };
 
-        log::info!("QUIC keep-alive connection established to {} ({})", device_info.device_name, addr);
+        // Complete the authentication handshake on the pooled connection.
+        let remote_addr = peer_conn.connection().remote_address();
+        if let Err(e) = peer_conn
+            .ensure_authenticated(|send, recv| {
+                authenticate_as_client(
+                    send,
+                    recv,
+                    app_state.device_id,
+                    app_state.device_name.clone(),
+                    remote_addr,
+                    app_state.clone(),
+                    Some(device_info.cert_fingerprint.clone()),
+                )
+            })
+            .await
+        {
+            log::warn!("Authentication with {} failed: {}", addr, e);
+            pool.remove(&device_id);
+            return;
+        }
 
-        // Add to connection pool using public method
-        let peer_conn = pool.add_incoming(device_id, connection.clone());
+        log::info!(
+            "QUIC connection established and authenticated with {} ({})",
+            device_info.device_name,
+            addr
+        );
 
-        // Register close callback
         let app_handle_clone = app_handle.clone();
-        pool.on_connection_close(device_id, move |_id| {
-            log::info!("QUIC connection closed, marking device {} as offline", _id);
-
-            // Update database to mark as offline
+        pool.on_connection_close(device_id, move |id| {
+            log::info!("QUIC connection closed, marking device {} as offline", id);
             if let Some(storage) = get_storage() {
-                if let Err(e) = storage.update_device_online_status(_id, false) {
+                if let Err(e) = storage.update_device_online_status(id, false) {
                     log::warn!("Failed to update device online status: {}", e);
                 }
             }
-
-            if let Err(e) = app_handle_clone.emit("device-offline", &_id) {
+            if let Err(e) = app_handle_clone.emit(DEVICE_OFFLINE_EVENT, &id) {
                 log::warn!("Failed to emit device-offline event: {}", e);
             }
         });
 
-        // Start monitoring
         peer_conn.start_monitoring(pool.clone());
-
-        // Wait for connection to close (the monitoring task will handle cleanup)
-        connection.closed().await;
     });
 }
 
 /// Broadcast a discovery packet to all interfaces
-async fn broadcast_discovery_packet(
-    socket: &UdpSocket,
-    packet: &DiscoveryPacket,
-) -> AppResult<()> {
+async fn broadcast_discovery_packet(socket: &UdpSocket, packet: &DiscoveryPacket) -> AppResult<()> {
     let data = packet.to_bytes()?;
     let broadcast_addrs = get_broadcast_addresses();
 
@@ -429,10 +436,16 @@ async fn handle_discovery_packet(
         crate::network::protocol::DiscoveryMessageType::Announce => {
             // Update or add device
             let device_info = packet.to_device_info(addr);
+            let local_cert_fingerprint = app_state
+                .certificate_fingerprint()
+                .await
+                .unwrap_or_default();
             let is_new = !app_state.devices.contains_key(&packet.device_id);
             let was_offline = check_device_was_offline(&app_state.devices, &packet.device_id);
 
-            app_state.devices.insert(packet.device_id, device_info.clone());
+            app_state
+                .devices
+                .insert(packet.device_id, device_info.clone());
 
             // Save to known devices
             if let Some(storage) = get_storage() {
@@ -453,7 +466,11 @@ async fn handle_discovery_packet(
             }
 
             if is_new {
-                log::info!("Device came online: {} ({})", device_info.device_name, device_info.ip_address);
+                log::info!(
+                    "Device came online: {} ({})",
+                    device_info.device_name,
+                    device_info.ip_address
+                );
                 if let Err(e) = app_handle.emit(DEVICE_ONLINE_EVENT, &device_info) {
                     log::warn!("Failed to emit device-online event: {}", e);
                 }
@@ -465,7 +482,7 @@ async fn handle_discovery_packet(
                 device_name: app_state.device_name.clone(),
                 os: detect_os(),
                 ip_address: addr.ip(),
-                quic_port: app_state.devices.get(&local_device_id).map(|d| d.quic_port).unwrap_or(crate::core::QUIC_DEFAULT_PORT),
+                quic_port: crate::core::QUIC_DEFAULT_PORT,
                 protocol_version: crate::network::protocol::PROTOCOL_VERSION.to_string(),
                 capabilities: vec![
                     Capability::FolderTransfer,
@@ -473,6 +490,7 @@ async fn handle_discovery_packet(
                     Capability::MultiDeviceSend,
                 ],
                 last_seen: SystemTime::now(),
+                cert_fingerprint: local_cert_fingerprint.to_string(),
             });
 
             if let Ok(response_data) = response_packet.to_bytes() {
@@ -487,7 +505,9 @@ async fn handle_discovery_packet(
             let is_new = !app_state.devices.contains_key(&packet.device_id);
             let was_offline = check_device_was_offline(&app_state.devices, &packet.device_id);
 
-            app_state.devices.insert(packet.device_id, device_info.clone());
+            app_state
+                .devices
+                .insert(packet.device_id, device_info.clone());
 
             // Save to known devices
             if let Some(storage) = get_storage() {
@@ -509,7 +529,11 @@ async fn handle_discovery_packet(
 
             // Emit online event if it's a new device or was previously offline
             if is_new || was_offline {
-                log::info!("Device discovered/updated: {} ({})", device_info.device_name, device_info.ip_address);
+                log::info!(
+                    "Device discovered/updated: {} ({})",
+                    device_info.device_name,
+                    device_info.ip_address
+                );
                 if let Err(e) = app_handle.emit(DEVICE_ONLINE_EVENT, &device_info) {
                     log::warn!("Failed to emit device-online event: {}", e);
                 }
@@ -518,7 +542,11 @@ async fn handle_discovery_packet(
         crate::network::protocol::DiscoveryMessageType::Goodbye => {
             // Remove device from online list
             if let Some((id, device)) = app_state.devices.remove(&packet.device_id) {
-                log::info!("Device went offline: {} ({})", device.device_name, device.ip_address);
+                log::info!(
+                    "Device went offline: {} ({})",
+                    device.device_name,
+                    device.ip_address
+                );
 
                 // Mark as offline in database (but keep the record)
                 if let Some(storage) = get_storage() {
@@ -554,7 +582,11 @@ async fn cleanup_offline_devices(app_state: &Arc<AppState>, app_handle: &AppHand
 
     for id in to_remove {
         if let Some((id, device)) = app_state.devices.remove(&id) {
-            log::info!("Device timed out: {} ({})", device.device_name, device.ip_address);
+            log::info!(
+                "Device timed out: {} ({})",
+                device.device_name,
+                device.ip_address
+            );
 
             // Mark as offline in database (but keep the record)
             if let Some(storage) = get_storage() {
@@ -575,6 +607,7 @@ async fn probe_known_devices(
     device_id: Uuid,
     device_name: String,
     quic_port: u16,
+    cert_fingerprint: String,
     running: Arc<Mutex<bool>>,
     app_state: Arc<AppState>,
     app_handle: AppHandle,
@@ -606,7 +639,10 @@ async fn probe_known_devices(
         return;
     }
 
-    log::info!("Probing {} known devices for cross-subnet discovery", known_devices.len());
+    log::info!(
+        "Probing {} known devices for cross-subnet discovery",
+        known_devices.len()
+    );
 
     // Create UDP socket for probing
     let socket = match UdpSocket::bind("0.0.0.0:0").await {
@@ -629,6 +665,7 @@ async fn probe_known_devices(
             Capability::ResumeTransfer,
             Capability::MultiDeviceSend,
         ],
+        cert_fingerprint,
     );
 
     let data = match packet.to_bytes() {
@@ -649,14 +686,22 @@ async fn probe_known_devices(
         let ip_addr = match known_device.ip_address.parse::<Ipv4Addr>() {
             Ok(ip) => ip,
             Err(e) => {
-                log::debug!("Invalid IP address for device {}: {}", known_device.device_id, e);
+                log::debug!(
+                    "Invalid IP address for device {}: {}",
+                    known_device.device_id,
+                    e
+                );
                 continue;
             }
         };
 
         let dest = SocketAddr::new(IpAddr::V4(ip_addr), DISCOVERY_PORT);
 
-        log::debug!("Probing known device at {}: {}", known_device.device_name, ip_addr);
+        log::debug!(
+            "Probing known device at {}: {}",
+            known_device.device_name,
+            ip_addr
+        );
 
         // Send probe packet
         if let Err(e) = socket.send_to(&data, dest).await {
@@ -682,7 +727,9 @@ async fn probe_known_devices(
                     &app_state,
                     &app_handle,
                     &socket,
-                ).await {
+                )
+                .await
+                {
                     log::debug!("Failed to handle probe response: {}", e);
                 }
             }
@@ -709,7 +756,8 @@ fn detect_os() -> OperatingSystem {
 }
 
 /// Global discovery service instance
-static DISCOVERY_SERVICE: tokio::sync::OnceCell<DiscoveryService> = tokio::sync::OnceCell::const_new();
+static DISCOVERY_SERVICE: tokio::sync::OnceCell<DiscoveryService> =
+    tokio::sync::OnceCell::const_new();
 
 /// Start the discovery service
 pub async fn start_discovery_service(
@@ -718,10 +766,15 @@ pub async fn start_discovery_service(
 ) -> AppResult<()> {
     let service = DISCOVERY_SERVICE
         .get_or_init(|| async {
+            let cert_fingerprint = app_state
+                .certificate_fingerprint()
+                .await
+                .unwrap_or_default();
             DiscoveryService::new(
                 app_state.device_id,
                 app_state.device_name.clone(),
                 crate::core::QUIC_DEFAULT_PORT,
+                cert_fingerprint,
             )
         })
         .await;
@@ -748,7 +801,8 @@ pub async fn discover_device_by_ip(
     use tokio::net::UdpSocket;
 
     // Parse the IP address
-    let ip_addr = ip.parse::<Ipv4Addr>()
+    let ip_addr = ip
+        .parse::<Ipv4Addr>()
         .map_err(|e| AppError::Config(format!("Invalid IP address: {}", e)))?;
 
     // Create UDP socket
@@ -756,6 +810,8 @@ pub async fn discover_device_by_ip(
 
     // Send discovery packet
     let dest = SocketAddr::new(IpAddr::V4(ip_addr), DISCOVERY_PORT);
+
+    let cert_fingerprint = state.certificate_fingerprint().await.unwrap_or_default();
 
     let packet = DiscoveryPacket::announce(
         state.device_id,
@@ -768,6 +824,7 @@ pub async fn discover_device_by_ip(
             Capability::ResumeTransfer,
             Capability::MultiDeviceSend,
         ],
+        cert_fingerprint,
     );
 
     let data = packet.to_bytes()?;
@@ -776,15 +833,12 @@ pub async fn discover_device_by_ip(
     // Wait for response with timeout
     let mut buf = vec![0u8; 65535];
 
-    match tokio::time::timeout(
-        Duration::from_secs(3),
-        socket.recv_from(&mut buf)
-    ).await {
+    match tokio::time::timeout(Duration::from_secs(3), socket.recv_from(&mut buf)).await {
         Ok(Ok((len, addr))) => {
             if let Ok(packet) = DiscoveryPacket::from_bytes(&buf[..len]) {
                 if packet.message_type == crate::network::protocol::DiscoveryMessageType::Response
-                    && packet.protocol_version == crate::network::protocol::PROTOCOL_VERSION {
-
+                    && packet.protocol_version == crate::network::protocol::PROTOCOL_VERSION
+                {
                     let device_info = packet.to_device_info(addr);
 
                     // Add to device list
@@ -804,7 +858,12 @@ pub async fn discover_device_by_ip(
                         log::warn!("Failed to emit device-online event: {}", e);
                     }
 
-                    log::info!("Device discovered at {}: {} ({})", ip, device_info.device_name, device_info.device_id);
+                    log::info!(
+                        "Device discovered at {}: {} ({})",
+                        ip,
+                        device_info.device_name,
+                        device_info.device_id
+                    );
                     return Ok(Some(device_info));
                 }
             }

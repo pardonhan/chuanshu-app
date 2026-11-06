@@ -5,6 +5,7 @@ import { useDeviceStore } from '../../store/useDeviceStore'
 import { sendFiles } from '../../services/tauriApi'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
 import type { DragDropEvent } from '@tauri-apps/api/webviewWindow'
+import type { UnlistenFn } from '@tauri-apps/api/event'
 
 interface FileItem {
   name: string
@@ -17,7 +18,7 @@ interface FileDropZoneProps {
 }
 
 export default function FileDropZone({ selectedDeviceId }: FileDropZoneProps) {
-  const { devices } = useDeviceStore()
+  const { devices, setDeviceStatus } = useDeviceStore()
   const [fileList, setFileList] = useState<FileItem[]>([])
   const [isModalOpen, setIsModalOpen] = useState(false)
   const [isSending, setIsSending] = useState(false)
@@ -61,25 +62,34 @@ export default function FileDropZone({ selectedDeviceId }: FileDropZoneProps) {
 
   useEffect(() => {
     // Listen for Tauri file drop events using Tauri v2 API
+    let unlisten: UnlistenFn | undefined
+    let disposed = false
+
     const setupDragDrop = async () => {
       try {
         const appWindow = getCurrentWebviewWindow()
-        const unlisten = await appWindow.onDragDropEvent((event: { payload: DragDropEvent }) => {
+        const fn = await appWindow.onDragDropEvent((event: { payload: DragDropEvent }) => {
           if (event.payload.type === 'drop') {
-            // User dropped files
             handleFileDrop(event.payload.paths)
           }
-          // 'over' - user is hovering with files
-          // 'leave' - user cancelled the drag operation
         })
 
-        return unlisten
+        if (disposed) {
+          fn()
+        } else {
+          unlisten = fn
+        }
       } catch (error) {
         console.error('Failed to setup drag-drop:', error)
       }
     }
 
     setupDragDrop()
+
+    return () => {
+      disposed = true
+      unlisten?.()
+    }
   }, [handleFileDrop])
 
   const handleRemoveFile = (index: number) => {
@@ -110,6 +120,7 @@ export default function FileDropZone({ selectedDeviceId }: FileDropZoneProps) {
     if (!selectedDeviceId || fileList.length === 0) return
 
     setIsSending(true)
+    setDeviceStatus(selectedDeviceId, 'connecting')
     try {
       const filePaths = fileList.map((f) => f.path)
       await sendFiles([selectedDeviceId], filePaths)
@@ -120,6 +131,7 @@ export default function FileDropZone({ selectedDeviceId }: FileDropZoneProps) {
       console.error('Failed to send files:', error)
       message.error('发送失败：' + String(error))
     } finally {
+      setDeviceStatus(selectedDeviceId, 'online')
       setIsSending(false)
     }
   }

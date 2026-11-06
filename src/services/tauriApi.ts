@@ -65,6 +65,25 @@ export interface TransferTaskInfo {
   progress: number
   error_message?: string
   created_at: number
+  save_path?: string | null
+}
+
+export interface IncomingTransferRequest {
+  task_id: string
+  sender_id: string
+  sender_name: string
+  file_count: number
+  total_size: number
+  files: Array<{
+    file_id: number
+    relative_path: string
+    file_name: string
+    file_size: number
+    modified_time: number
+    checksum?: string
+    is_directory: boolean
+  }>
+  resume: boolean
 }
 
 // Settings type
@@ -81,12 +100,16 @@ export interface Settings {
 // Transfer history type
 export interface TransferHistoryEntry {
   task_id: string
+  peer_device_id: string
   peer_device_name: string
   transfer_type: 'send' | 'receive'
   status: 'completed' | 'failed' | 'canceled' | 'pending' | 'transferring' | 'paused'
   total_size: number
   file_count: number
   file_names: string | null
+  source_path: string | null
+  destination_path: string | null
+  file_metadata_json: string | null
   created_at: number
   completed_at: number | null
 }
@@ -98,10 +121,6 @@ export interface TransferHistoryQuery {
 }
 
 // IPC API functions
-export async function getDeviceList(): Promise<DeviceInfo[]> {
-  return invoke('get_device_list')
-}
-
 export async function discoverDeviceByIp(ip: string): Promise<DeviceInfo | null> {
   return invoke('discover_device_by_ip', { ip })
 }
@@ -124,6 +143,14 @@ export async function pauseTransfer(taskId: string): Promise<void> {
 
 export async function resumeTransfer(taskId: string): Promise<void> {
   return invoke('resume_transfer', { taskId })
+}
+
+export async function acceptTransferRequest(taskId: string): Promise<void> {
+  return invoke('accept_transfer_request', { taskId })
+}
+
+export async function rejectTransferRequest(taskId: string): Promise<void> {
+  return invoke('reject_transfer_request', { taskId })
 }
 
 export async function getSettings(): Promise<Settings> {
@@ -176,7 +203,7 @@ export async function openFileLocation(filePath: string): Promise<void> {
 }
 
 export async function resendFiles(deviceId: string, filePaths: string[]): Promise<string[]> {
-  return invoke('resend_files', { deviceId, filePaths })
+  return invoke('resend_files', { deviceIds: [deviceId], filePaths })
 }
 
 // Event listeners
@@ -204,8 +231,14 @@ export function onTransferCompleted(callback: (taskId: string) => void): Promise
   })
 }
 
-export function onTransferFailed(callback: (payload: { taskId: string; error: string }) => void): Promise<UnlistenFn> {
-  return listen('transfer-failed', (event: Event<{ taskId: string; error: string }>) => {
+export function onTransferFailed(callback: (payload: { task_id: string; error: string }) => void): Promise<UnlistenFn> {
+  return listen('transfer-failed', (event: Event<{ task_id: string; error: string }>) => {
+    callback(event.payload)
+  })
+}
+
+export function onTransferRequest(callback: (request: IncomingTransferRequest) => void): Promise<UnlistenFn> {
+  return listen('transfer-request', (event: Event<IncomingTransferRequest>) => {
     callback(event.payload)
   })
 }

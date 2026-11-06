@@ -30,12 +30,17 @@ impl RateLimiter {
         Self {
             max_tokens,
             tokens: max_tokens,
-            refill_rate: if limit_bytes_per_sec == 0 { u64::MAX } else { limit_bytes_per_sec as u64 },
+            refill_rate: if limit_bytes_per_sec == 0 {
+                u64::MAX
+            } else {
+                limit_bytes_per_sec as u64
+            },
             last_refill: Instant::now(),
         }
     }
 
-    /// Create an unlimited rate limiter
+    /// Create an unlimited rate limiter (used in tests)
+    #[cfg(test)]
     pub fn unlimited() -> Self {
         Self::new(0)
     }
@@ -53,9 +58,9 @@ impl RateLimiter {
             // Calculate how long to wait
             let needed = tokens - self.tokens;
             if self.refill_rate == u64::MAX {
-                None // Unlimited, wait a tiny bit
+                None // Unlimited
             } else {
-                let wait_ms = (needed * 1000) / self.refill_rate;
+                let wait_ms = needed.saturating_mul(1000) / self.refill_rate;
                 Some(Duration::from_millis(wait_ms))
             }
         }
@@ -68,19 +73,12 @@ impl RateLimiter {
 
         if elapsed.as_secs_f64() > 0.0 {
             let refill_amount = (elapsed.as_secs_f64() * self.refill_rate as f64) as u64;
-            self.tokens = std::cmp::min(self.tokens + refill_amount, self.max_tokens);
+            self.tokens = self
+                .tokens
+                .saturating_add(refill_amount)
+                .min(self.max_tokens);
             self.last_refill = now;
         }
-    }
-
-    /// Get current tokens
-    pub fn tokens(&self) -> u64 {
-        self.tokens
-    }
-
-    /// Check if rate limited
-    pub fn is_limited(&self) -> bool {
-        self.tokens < self.max_tokens
     }
 }
 
@@ -98,11 +96,6 @@ impl SharedRateLimiter {
         }
     }
 
-    /// Create an unlimited rate limiter
-    pub fn unlimited() -> Self {
-        Self::new(0)
-    }
-
     /// Consume tokens, waiting if necessary
     pub async fn consume_and_wait(&self, bytes: u64) {
         loop {
@@ -113,18 +106,15 @@ impl SharedRateLimiter {
 
             match wait_duration {
                 Some(duration) => {
-                    // Wait and retry
                     tokio::time::sleep(duration).await;
                 }
-                None => {
-                    // Can consume immediately
-                    break;
-                }
+                None => break,
             }
         }
     }
 
-    /// Try to consume tokens without waiting
+    /// Try to consume tokens without waiting (used in tests)
+    #[cfg(test)]
     pub async fn try_consume(&self, bytes: u64) -> bool {
         let mut limiter = self.inner.lock().await;
         limiter.consume(bytes).is_none()

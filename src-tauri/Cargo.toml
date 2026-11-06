@@ -31,7 +31,7 @@ futures = "0.3"
 
 # 网络通信
 quinn = "0.10"
-rustls = "0.21"
+rustls = { version = "0.21", features = ["dangerous_configuration"] }
 rustls-pemfile = "1.0"
 socket2 = { version = "0.5", features = ["all"] }
 if-addrs = "0.10"

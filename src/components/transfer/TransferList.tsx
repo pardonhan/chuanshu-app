@@ -7,6 +7,7 @@ import {
   cancelTransfer,
   pauseTransfer,
   resumeTransfer,
+  openFileLocation,
   onTransferProgress,
   onTransferCompleted,
   onTransferFailed,
@@ -20,7 +21,7 @@ export default function TransferList() {
     tasks,
     isLoading,
     setTasks,
-    updateTaskProgress,
+    upsertTask,
     setTaskStatus,
     setLoading
   } = useTransferStore()
@@ -48,7 +49,7 @@ export default function TransferList() {
 
     const setupListeners = async () => {
       unlistenProgress = await onTransferProgress((task: TransferTaskInfo) => {
-        updateTaskProgress(task.task_id, task.progress, task.speed, task.transferred_size)
+        upsertTask(task)
       })
 
       unlistenCompleted = await onTransferCompleted((taskId: string) => {
@@ -56,24 +57,20 @@ export default function TransferList() {
         loadTasks()
       })
 
-      unlistenFailed = await onTransferFailed(({ taskId }: { taskId: string; error: string }) => {
-        setTaskStatus(taskId, 'Failed')
+      unlistenFailed = await onTransferFailed(({ task_id }: { task_id: string; error: string }) => {
+        setTaskStatus(task_id, 'Failed')
         loadTasks()
       })
     }
 
     setupListeners()
 
-    // Poll for updates every 2 seconds
-    const interval = setInterval(loadTasks, 2000)
-
     return () => {
-      clearInterval(interval)
       unlistenProgress?.()
       unlistenCompleted?.()
       unlistenFailed?.()
     }
-  }, [loadTasks, updateTaskProgress, setTaskStatus])
+  }, [loadTasks, upsertTask, setTaskStatus])
 
   const handlePause = async (taskId: string) => {
     try {
@@ -159,8 +156,17 @@ export default function TransferList() {
                     onClick={() => handleCancel(task.task_id)}
                   />
                 ),
-                task.status === 'Completed' && (
-                  <Button type="text" icon={<FolderOpenOutlined />} size="small" />
+                task.status === 'Completed' && task.save_path && (
+                  <Button
+                    type="text"
+                    icon={<FolderOpenOutlined />}
+                    size="small"
+                    onClick={() => {
+                      openFileLocation(task.save_path as string).catch((error) =>
+                        console.error('Failed to open file location:', error)
+                      )
+                    }}
+                  />
                 ),
               ].filter(Boolean)}
             >

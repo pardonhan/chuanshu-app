@@ -4,11 +4,16 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::core::{AppResult, AppState};
+use crate::network::device::{DeviceInfo, OperatingSystem};
 use crate::network::protocol::{
-    AuthHello, AuthResponse, AuthAck, ControlMessage, ControlMessageType,
+    AuthAck, AuthHello, AuthResponse, ControlMessage, ControlMessageType, PROTOCOL_VERSION,
 };
 
-/// Perform authentication handshake as client (initiator)
+/// Perform authentication handshake as client (initiator).
+///
+/// `expected_cert_fingerprint` is the fingerprint advertised through discovery.
+/// When present, the peer's claimed fingerprint must match it.
+#[allow(clippy::too_many_arguments)]
 pub async fn authenticate_as_client(
     mut send: quinn::SendStream,
     mut recv: quinn::RecvStream,
@@ -16,58 +21,77 @@ pub async fn authenticate_as_client(
     local_device_name: String,
     remote_addr: SocketAddr,
     app_state: Arc<AppState>,
+    expected_cert_fingerprint: Option<String>,
 ) -> AppResult<Uuid> {
-    use sha2::{Sha256, Digest};
+    use sha2::{Digest, Sha256};
 
     log::info!("Starting client authentication handshake");
 
-    // Generate random nonce
     let nonce: Vec<u8> = (0..32).map(|_| rand::random::<u8>()).collect();
+    let local_fingerprint = app_state
+        .certificate_fingerprint()
+        .await
+        .unwrap_or_default();
 
-    // Send AuthHello
     let hello = AuthHello {
         device_id: local_device_id,
         device_name: local_device_name.clone(),
-        protocol_version: crate::network::protocol::PROTOCOL_VERSION.to_string(),
+        protocol_version: PROTOCOL_VERSION.to_string(),
+        cert_fingerprint: local_fingerprint,
         nonce: nonce.clone(),
     };
 
     let hello_msg = ControlMessage::new(ControlMessageType::AuthHello, &hello)?;
     send_control_message(&mut send, &hello_msg).await?;
 
-    // Receive AuthResponse
     let response_msg = recv_control_message(&mut recv).await?;
     let response: AuthResponse = response_msg.payload()?;
 
-    log::info!("Received auth response from device {} ({})", response.device_id, response.device_name);
-
-    // Verify the peer's signature (simplified - in production, use proper digital signatures)
-    let expected_hash = Sha256::digest(&[&nonce[..], response.device_id.as_bytes()].concat());
-    let expected_signature = expected_hash.to_vec();
-
-    // For now, accept any signature (simplified for LAN use)
-    // In production, verify using peer's public key
-    let _ = expected_signature;
-
-    // Store peer device info
-    app_state.devices.insert(
+    log::info!(
+        "Received auth response from device {} ({})",
         response.device_id,
-        crate::network::device::DeviceInfo {
+        response.device_name
+    );
+
+    // Verify the peer's challenge response before accepting the connection.
+    let expected_hash = Sha256::digest(&[&nonce[..], response.device_id.as_bytes()].concat());
+    if response.signature != expected_hash.to_vec() {
+        return Err(crate::core::AppError::Other(
+            "Peer authentication signature mismatch".to_string(),
+        ));
+    }
+    if response.cert_fingerprint.is_empty() || response.cert_fingerprint.starts_with("mock-") {
+        return Err(crate::core::AppError::Other(
+            "Peer certificate fingerprint is invalid".to_string(),
+        ));
+    }
+    if let Some(expected) = &expected_cert_fingerprint {
+        if &response.cert_fingerprint != expected {
+            return Err(crate::core::AppError::Other(
+                "Peer certificate fingerprint does not match discovery record".to_string(),
+            ));
+        }
+    }
+
+    upsert_device_info(
+        &app_state,
+        DeviceInfo {
             device_id: response.device_id,
             device_name: response.device_name.clone(),
-            os: crate::network::device::OperatingSystem::Unknown,
+            os: OperatingSystem::Unknown,
             ip_address: remote_addr.ip(),
             quic_port: remote_addr.port(),
             protocol_version: hello.protocol_version.clone(),
             capabilities: vec![],
             last_seen: std::time::SystemTime::now(),
-        }
+            cert_fingerprint: response.cert_fingerprint.clone(),
+        },
     );
 
-    // Send AuthAck
     let ack = AuthAck {
         device_id: local_device_id,
-        signature: vec![], // Simplified - would sign response.nonce in production
+        signature: Sha256::digest(&[&response.nonce[..], local_device_id.as_bytes()].concat())
+            .to_vec(),
         authenticated: true,
         error: None,
     };
@@ -75,12 +99,16 @@ pub async fn authenticate_as_client(
     let ack_msg = ControlMessage::new(ControlMessageType::AuthAck, &ack)?;
     send_control_message(&mut send, &ack_msg).await?;
 
-    log::info!("Client authentication completed with device {}", response.device_id);
+    log::info!(
+        "Client authentication completed with device {}",
+        response.device_id
+    );
 
     Ok(response.device_id)
 }
 
-/// Perform authentication handshake as server (responder)
+/// Perform authentication handshake as server (responder).
+#[allow(clippy::too_many_arguments)]
 pub async fn authenticate_as_server(
     mut send: quinn::SendStream,
     mut recv: quinn::RecvStream,
@@ -89,27 +117,39 @@ pub async fn authenticate_as_server(
     remote_addr: SocketAddr,
     app_state: Arc<AppState>,
 ) -> AppResult<Uuid> {
-    use sha2::{Sha256, Digest};
+    use sha2::{Digest, Sha256};
 
     log::info!("Starting server authentication handshake");
 
-    // Receive AuthHello
     let hello_msg = recv_control_message(&mut recv).await?;
     let hello: AuthHello = hello_msg.payload()?;
 
-    log::info!("Received auth hello from device {} ({})", hello.device_id, hello.device_name);
+    log::info!(
+        "Received auth hello from device {} ({})",
+        hello.device_id,
+        hello.device_name
+    );
 
-    // Generate random nonce for response
+    if hello.protocol_version != PROTOCOL_VERSION {
+        return Err(crate::core::AppError::Other(format!(
+            "Incompatible protocol version: {}",
+            hello.protocol_version
+        )));
+    }
+    if hello.cert_fingerprint.is_empty() || hello.cert_fingerprint.starts_with("mock-") {
+        return Err(crate::core::AppError::Other(
+            "Peer certificate fingerprint is invalid".to_string(),
+        ));
+    }
+
     let response_nonce: Vec<u8> = (0..32).map(|_| rand::random::<u8>()).collect();
+    let signature =
+        Sha256::digest(&[&hello.nonce[..], local_device_id.as_bytes()].concat()).to_vec();
 
-    // Create signature (simplified - in production, sign with private key)
-    let hash = Sha256::digest(&[&hello.nonce[..], local_device_id.as_bytes()].concat());
-    let signature = hash.to_vec();
+    let cert_fingerprint = app_state.certificate_fingerprint().await.ok_or_else(|| {
+        crate::core::AppError::Other("Local certificate fingerprint is unavailable".to_string())
+    })?;
 
-    // Get certificate fingerprint (simplified - would use actual cert in production)
-    let cert_fingerprint = format!("mock-fingerprint-{}", local_device_id);
-
-    // Send AuthResponse
     let response = AuthResponse {
         device_id: local_device_id,
         device_name: local_device_name.clone(),
@@ -121,34 +161,66 @@ pub async fn authenticate_as_server(
     let response_msg = ControlMessage::new(ControlMessageType::AuthResponse, &response)?;
     send_control_message(&mut send, &response_msg).await?;
 
-    // Receive AuthAck
     let ack_msg = recv_control_message(&mut recv).await?;
     let ack: AuthAck = ack_msg.payload()?;
 
-    if !ack.authenticated {
-        return Err(crate::core::AppError::Other(
-            format!("Authentication failed: {}", ack.error.unwrap_or_default())
-        ));
+    let expected_ack =
+        Sha256::digest(&[&response_nonce[..], hello.device_id.as_bytes()].concat()).to_vec();
+    if !ack.authenticated || ack.device_id != hello.device_id || ack.signature != expected_ack {
+        return Err(crate::core::AppError::Other(format!(
+            "Authentication failed: {}",
+            ack.error.unwrap_or_default()
+        )));
     }
 
-    // Store peer device info
-    app_state.devices.insert(
-        hello.device_id,
-        crate::network::device::DeviceInfo {
+    upsert_device_info(
+        &app_state,
+        DeviceInfo {
             device_id: hello.device_id,
             device_name: hello.device_name.clone(),
-            os: crate::network::device::OperatingSystem::Unknown,
+            os: OperatingSystem::Unknown,
             ip_address: remote_addr.ip(),
             quic_port: remote_addr.port(),
             protocol_version: hello.protocol_version.clone(),
             capabilities: vec![],
             last_seen: std::time::SystemTime::now(),
-        }
+            cert_fingerprint: hello.cert_fingerprint.clone(),
+        },
     );
 
-    log::info!("Server authentication completed with device {}", hello.device_id);
+    log::info!(
+        "Server authentication completed with device {}",
+        hello.device_id
+    );
 
     Ok(hello.device_id)
+}
+
+/// Merge authentication data into the device table without discarding
+/// capabilities/OS information learned from discovery.
+fn upsert_device_info(app_state: &Arc<AppState>, device: DeviceInfo) {
+    use dashmap::mapref::entry::Entry;
+
+    match app_state.devices.entry(device.device_id) {
+        Entry::Occupied(mut entry) => {
+            let existing = entry.get_mut();
+            existing.ip_address = device.ip_address;
+            existing.quic_port = device.quic_port;
+            existing.last_seen = device.last_seen;
+            if existing.cert_fingerprint.is_empty() {
+                existing.cert_fingerprint = device.cert_fingerprint;
+            }
+            if existing.capabilities.is_empty() {
+                existing.capabilities = device.capabilities;
+            }
+            if existing.device_name.is_empty() {
+                existing.device_name = device.device_name;
+            }
+        }
+        Entry::Vacant(entry) => {
+            entry.insert(device);
+        }
+    }
 }
 
 /// Send control message with length prefix
@@ -158,43 +230,40 @@ async fn send_control_message(
 ) -> AppResult<()> {
     let data = message.to_bytes()?;
     let len = data.len() as u32;
-    send.write_all(&len.to_be_bytes()).await
+    send.write_all(&len.to_be_bytes())
+        .await
         .map_err(|e| crate::core::AppError::Network(format!("Failed to write message: {}", e)))?;
-    send.write_all(&data).await
+    send.write_all(&data)
+        .await
         .map_err(|e| crate::core::AppError::Network(format!("Failed to write message: {}", e)))?;
     Ok(())
 }
 
 /// Receive control message with length prefix
-async fn recv_control_message(
-    recv: &mut quinn::RecvStream,
-) -> AppResult<ControlMessage> {
-    use tokio::io::AsyncReadExt;
-
+async fn recv_control_message(recv: &mut quinn::RecvStream) -> AppResult<ControlMessage> {
     let mut len_buf = [0u8; 4];
-    recv.read_exact(&mut len_buf).await
-        .map_err(|e| crate::core::AppError::Network(format!("Failed to read message length: {}", e)))?;
+    recv.read_exact(&mut len_buf).await.map_err(|e| {
+        crate::core::AppError::Network(format!("Failed to read message length: {}", e))
+    })?;
     let msg_len = u32::from_be_bytes(len_buf) as usize;
 
     if msg_len > 10 * 1024 * 1024 {
-        return Err(crate::core::AppError::Other("Message too large".to_string()));
+        return Err(crate::core::AppError::Other(
+            "Message too large".to_string(),
+        ));
     }
 
     let mut msg_buf = vec![0u8; msg_len];
-    recv.read_exact(&mut msg_buf).await
+    recv.read_exact(&mut msg_buf)
+        .await
         .map_err(|e| crate::core::AppError::Network(format!("Failed to read message: {}", e)))?;
 
     ControlMessage::from_bytes(&msg_buf)
 }
 
-/// Generate a random nonce
-pub fn generate_nonce() -> Vec<u8> {
-    (0..32).map(|_| rand::random::<u8>()).collect()
-}
-
 /// Calculate certificate fingerprint
 pub fn calculate_cert_fingerprint(cert_der: &[u8]) -> String {
-    use sha2::{Sha256, Digest};
+    use sha2::{Digest, Sha256};
     let hash = Sha256::digest(cert_der);
     format!("{:x}", hash)
 }

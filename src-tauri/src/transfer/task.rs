@@ -1,4 +1,4 @@
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::SystemTime;
 use uuid::Uuid;
@@ -56,6 +56,8 @@ pub struct TransferTaskInfo {
     pub progress: f64,
     pub error_message: Option<String>,
     pub created_at: u64,
+    /// Destination path, available for completed receive tasks.
+    pub save_path: Option<String>,
 }
 
 impl TransferTask {
@@ -123,7 +125,8 @@ impl TransferTask {
 
 impl From<&TransferTask> for TransferTaskInfo {
     fn from(task: &TransferTask) -> Self {
-        let created_at = task.created_at
+        let created_at = task
+            .created_at
             .duration_since(SystemTime::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
@@ -141,6 +144,10 @@ impl From<&TransferTask> for TransferTaskInfo {
             progress: task.progress(),
             error_message: task.error_message.clone(),
             created_at,
+            save_path: task
+                .save_path
+                .as_ref()
+                .map(|path| path.to_string_lossy().to_string()),
         }
     }
 }

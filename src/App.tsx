@@ -7,6 +7,7 @@ import HomePage from './pages/HomePage'
 import HistoryPage from './pages/HistoryPage'
 import SettingsPage from './pages/SettingsPage'
 import { getSettings } from './services/tauriApi'
+import IncomingTransferRequestModal from './components/transfer/IncomingTransferRequestModal'
 
 const { Sider, Content } = Layout
 
@@ -80,30 +81,33 @@ function App() {
         algorithm: currentTheme === 'dark' ? theme.darkAlgorithm : theme.defaultAlgorithm,
       }}
     >
-      <Layout style={{ height: '100vh' }}>
-        <Sider
-          width={200}
-          theme={currentTheme === 'dark' ? 'dark' : 'light'}
-          style={{
-            background: currentTheme === 'dark' ? '#141414' : '#ffffff',
-          }}
-        >
-          <Sidebar currentPage={currentPage} onPageChange={setCurrentPage} />
-        </Sider>
-        <Layout>
-          <Content
+      <>
+        <Layout style={{ height: '100vh' }}>
+          <Sider
+            width={200}
+            theme={currentTheme === 'dark' ? 'dark' : 'light'}
             style={{
-              padding: '24px',
-              overflow: 'auto',
-              background: currentTheme === 'dark' ? '#1f1f1f' : '#f5f5f5',
+              background: currentTheme === 'dark' ? '#141414' : '#ffffff',
             }}
           >
-            {currentPage === 'home' && <HomePage />}
-            {currentPage === 'history' && <HistoryPage />}
-            {currentPage === 'settings' && <SettingsPage />}
-          </Content>
+            <Sidebar currentPage={currentPage} onPageChange={setCurrentPage} />
+          </Sider>
+          <Layout>
+            <Content
+              style={{
+                padding: '24px',
+                overflow: 'auto',
+                background: currentTheme === 'dark' ? '#1f1f1f' : '#f5f5f5',
+              }}
+            >
+              {currentPage === 'home' && <HomePage />}
+              {currentPage === 'history' && <HistoryPage />}
+              {currentPage === 'settings' && <SettingsPage />}
+            </Content>
+          </Layout>
         </Layout>
-      </Layout>
+        <IncomingTransferRequestModal />
+      </>
     </ConfigProvider>
   )
 }

@@ -1,7 +1,7 @@
 import { Card, Table, Button, Space, message, Modal } from 'antd'
 import { FolderOutlined, DeleteOutlined, RedoOutlined } from '@ant-design/icons'
 import { useEffect, useState } from 'react'
-import { getTransferHistory, clearTransferHistory, type TransferHistoryEntry } from '../services/tauriApi'
+import { getTransferHistory, clearTransferHistory, openFileLocation, resendFiles, type TransferHistoryEntry } from '../services/tauriApi'
 
 interface TableItem {
   key: string
@@ -52,6 +52,16 @@ const convertToTableItem = (entry: TransferHistoryEntry): TableItem => {
     date: formatTimestamp(entry.created_at),
     device: entry.peer_device_name,
     raw: entry,
+  }
+}
+
+const sourcePathsFor = (entry: TransferHistoryEntry): string[] => {
+  if (!entry.source_path) return []
+  try {
+    const parsed = JSON.parse(entry.source_path)
+    return Array.isArray(parsed) ? parsed : [entry.source_path]
+  } catch {
+    return [entry.source_path]
   }
 }
 
@@ -146,17 +156,30 @@ export default function HistoryPage() {
   }
 
   const handleOpenLocation = async (_record: TableItem) => {
-    // For completed receive transfers, we could store the download path
-    // For now, show a message as we don't have the actual path stored
-    message.info('文件路径需要在历史记录中保存')
-    // TODO: Once we have file_path in TransferHistoryEntry, call:
-    // await openFileLocation(record.filePath)
+    const path = _record.raw.destination_path || sourcePathsFor(_record.raw)[0]
+    if (!path) {
+      message.info('该记录没有保存文件路径')
+      return
+    }
+    try {
+      await openFileLocation(path)
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '打开文件位置失败')
+    }
   }
 
-  const handleResend = async (_record: TableItem) => {
-    // TODO: This would need the original file paths to resend
-    // For now, show a message
-    message.info('重新发送功能需要原始文件路径')
+  const handleResend = async (record: TableItem) => {
+    if (!record.raw.source_path) {
+      message.info('该记录没有保存原始文件路径')
+      return
+    }
+    try {
+      const filePaths = sourcePathsFor(record.raw)
+      await resendFiles(record.raw.peer_device_id, filePaths)
+      message.success('已重新创建传输任务')
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '重新发送失败')
+    }
   }
 
   const columnsWithHandlers = columns.map(col => {

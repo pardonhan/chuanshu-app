@@ -1,13 +1,10 @@
-use serde::{Serialize, Deserialize};
+use crate::network::device::{Capability, DeviceInfo, OperatingSystem};
+use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, SocketAddr};
 use uuid::Uuid;
-use crate::network::device::{DeviceInfo, OperatingSystem, Capability};
 
-/// Protocol version for compatibility checking
-pub const PROTOCOL_VERSION: &str = "1.0.0";
-
-/// Maximum UDP packet size
-pub const MAX_UDP_PACKET_SIZE: usize = 65507;
+/// Protocol version for compatibility checking (re-exported from core constants).
+pub use crate::core::constants::PROTOCOL_VERSION;
 
 /// Discovery message types
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -39,6 +36,8 @@ pub struct DiscoveryPacket {
     pub quic_port: u16,
     /// Device capabilities
     pub capabilities: Vec<Capability>,
+    /// SHA-256 fingerprint of the device's QUIC certificate
+    pub cert_fingerprint: String,
     /// Timestamp when packet was sent
     pub timestamp: u64,
 }
@@ -52,6 +51,7 @@ impl DiscoveryPacket {
         ip_address: Option<IpAddr>,
         quic_port: u16,
         capabilities: Vec<Capability>,
+        cert_fingerprint: String,
     ) -> Self {
         Self {
             message_type: DiscoveryMessageType::Announce,
@@ -62,6 +62,7 @@ impl DiscoveryPacket {
             ip_address,
             quic_port,
             capabilities,
+            cert_fingerprint,
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -80,6 +81,7 @@ impl DiscoveryPacket {
             ip_address: None, // Will be determined from socket
             quic_port: local_device.quic_port,
             capabilities: local_device.capabilities.clone(),
+            cert_fingerprint: local_device.cert_fingerprint.clone(),
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -88,7 +90,13 @@ impl DiscoveryPacket {
     }
 
     /// Create a goodbye packet
-    pub fn goodbye(device_id: Uuid, device_name: String, os: OperatingSystem, quic_port: u16) -> Self {
+    pub fn goodbye(
+        device_id: Uuid,
+        device_name: String,
+        os: OperatingSystem,
+        quic_port: u16,
+        cert_fingerprint: String,
+    ) -> Self {
         Self {
             message_type: DiscoveryMessageType::Goodbye,
             protocol_version: PROTOCOL_VERSION.to_string(),
@@ -98,6 +106,7 @@ impl DiscoveryPacket {
             ip_address: None,
             quic_port,
             capabilities: vec![],
+            cert_fingerprint,
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -127,6 +136,7 @@ impl DiscoveryPacket {
             protocol_version: self.protocol_version.clone(),
             capabilities: self.capabilities.clone(),
             last_seen: std::time::SystemTime::now(),
+            cert_fingerprint: self.cert_fingerprint.clone(),
         }
     }
 }
@@ -144,18 +154,16 @@ pub enum ControlMessageType {
     TransferRequest,
     /// File transfer response (accept/reject)
     TransferResponse,
+    /// Starts a file data stream on an authenticated connection
+    DataTransferStart,
+    /// Receiver response describing which chunks are still required
+    DataTransferReady,
     /// Cancel ongoing transfer
     CancelTransfer,
     /// Pause transfer
     PauseTransfer,
     /// Resume transfer
     ResumeTransfer,
-    /// Query transfer progress
-    QueryProgress,
-    /// Progress update
-    ProgressUpdate,
-    /// Error notification
-    Error,
 }
 
 /// Authentication hello message
@@ -167,6 +175,8 @@ pub struct AuthHello {
     pub device_name: String,
     /// Protocol version
     pub protocol_version: String,
+    /// Certificate fingerprint (SHA-256) of the sender
+    pub cert_fingerprint: String,
     /// Random nonce for challenge-response
     pub nonce: Vec<u8>,
 }
@@ -221,6 +231,17 @@ pub struct FileMetadata {
     pub source_path: String,
 }
 
+/// Per-file header sent at the beginning of each file's data section.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileHeader {
+    pub task_id: Uuid,
+    pub file_id: u64,
+    pub file_name: String,
+    pub file_size: u64,
+    pub relative_path: String,
+    pub checksum: Option<String>,
+}
+
 /// Transfer request message
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransferRequest {
@@ -253,6 +274,23 @@ pub struct TransferResponse {
     pub save_path: Option<String>,
 }
 
+/// Starts a data stream after a transfer request has been accepted.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DataTransferStart {
+    pub task_id: Uuid,
+    pub files: Vec<FileMetadata>,
+    pub resume: bool,
+}
+
+/// Receiver response for a data stream. Missing chunks are indexed per file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DataTransferReady {
+    pub task_id: Uuid,
+    pub accepted: bool,
+    pub reason: Option<String>,
+    pub missing_chunks: std::collections::HashMap<u64, Vec<u64>>,
+}
+
 /// Chunk metadata for data transfer
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChunkMetadata {
@@ -275,6 +313,8 @@ pub struct ChunkMetadata {
 /// Control message envelope
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ControlMessage {
+    /// Protocol version
+    pub protocol_version: String,
     /// Message type
     pub message_type: ControlMessageType,
     /// Payload (type-specific serialized data)
@@ -283,8 +323,12 @@ pub struct ControlMessage {
 
 impl ControlMessage {
     /// Create a new control message
-    pub fn new<T: Serialize>(message_type: ControlMessageType, payload: &T) -> crate::core::AppResult<Self> {
+    pub fn new<T: Serialize>(
+        message_type: ControlMessageType,
+        payload: &T,
+    ) -> crate::core::AppResult<Self> {
         Ok(Self {
+            protocol_version: PROTOCOL_VERSION.to_string(),
             message_type,
             payload: bincode::serialize(payload)?,
         })
@@ -300,9 +344,16 @@ impl ControlMessage {
         Ok(bincode::serialize(self)?)
     }
 
-    /// Deserialize from bytes
+    /// Deserialize from bytes and reject incompatible protocol versions.
     pub fn from_bytes(data: &[u8]) -> crate::core::AppResult<Self> {
-        Ok(bincode::deserialize(data)?)
+        let message: Self = bincode::deserialize(data)?;
+        if message.protocol_version != PROTOCOL_VERSION {
+            return Err(crate::core::AppError::Other(format!(
+                "Incompatible control protocol version: {} (expected {})",
+                message.protocol_version, PROTOCOL_VERSION
+            )));
+        }
+        Ok(message)
     }
 }
 
@@ -313,37 +364,4 @@ pub struct DataPacket {
     pub metadata: ChunkMetadata,
     /// Actual data (may be empty for metadata-only packets)
     pub data: Vec<u8>,
-}
-
-impl DataPacket {
-    /// Serialize to bytes
-    pub fn to_bytes(&self) -> crate::core::AppResult<Vec<u8>> {
-        Ok(bincode::serialize(self)?)
-    }
-
-    /// Deserialize from bytes
-    pub fn from_bytes(data: &[u8]) -> crate::core::AppResult<Self> {
-        Ok(bincode::deserialize(data)?)
-    }
-}
-
-/// Transfer progress update
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProgressUpdate {
-    /// Transfer task ID
-    pub task_id: Uuid,
-    /// Current file ID
-    pub current_file_id: u64,
-    /// Current file name
-    pub current_file_name: String,
-    /// Bytes transferred for current file
-    pub file_transferred: u64,
-    /// Total bytes transferred
-    pub total_transferred: u64,
-    /// Current speed (bytes per second)
-    pub speed: u64,
-    /// Is completed
-    pub completed: bool,
-    /// Error message (if failed)
-    pub error: Option<String>,
 }

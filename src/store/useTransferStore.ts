@@ -12,6 +12,7 @@ interface TransferState {
   updateTask: (task: TransferTaskInfo) => void
   removeTask: (taskId: string) => void
   updateTaskProgress: (taskId: string, progress: number, speed: number, transferredSize: number) => void
+  upsertTask: (task: TransferTaskInfo) => void
   setTaskStatus: (taskId: string, status: TransferTaskInfo['status']) => void
   setLoading: (loading: boolean) => void
   setError: (error: string | null) => void
@@ -54,6 +55,16 @@ export const useTransferStore = create<TransferState>((set, get) => ({
           ? { ...t, progress, speed, transferred_size: transferredSize }
           : t
       )
+    })
+  },
+
+  upsertTask: (task) => {
+    const { tasks } = get()
+    const exists = tasks.find((t) => t.task_id === task.task_id)
+    set({
+      tasks: exists
+        ? tasks.map((t) => (t.task_id === task.task_id ? task : t))
+        : [task, ...tasks],
     })
   },
 
