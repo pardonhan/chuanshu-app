@@ -72,6 +72,10 @@ impl TransferManager {
                 file_count,
             );
             task.files = metas.clone();
+            task.file_paths = files
+                .iter()
+                .map(|(path, _)| path.to_string_lossy().to_string())
+                .collect();
             task.set_status(TransferStatus::Transferring);
 
             self.app_state

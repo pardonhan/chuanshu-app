@@ -296,6 +296,101 @@ pub async fn get_transfer_tasks(state: State<'_, Arc<AppState>>) -> AppResult<Ve
     Ok(tasks)
 }
 
+/// 取出指定任务中登记的第 index 个本地文件路径
+async fn resolve_task_file(
+    task_id: Uuid,
+    index: usize,
+    state: &Arc<AppState>,
+) -> AppResult<std::path::PathBuf> {
+    let arc = state
+        .transfer_tasks
+        .get(&task_id)
+        .map(|entry| entry.value().clone())
+        .ok_or_else(|| AppError::DeviceNotFound("传输任务不存在".to_string()))?;
+
+    let task = arc.lock().await;
+    if task.status != crate::transfer::TransferStatus::Completed {
+        return Err(AppError::Other("只有已完成的传输才能打开文件".to_string()));
+    }
+
+    let path = task
+        .file_paths
+        .get(index)
+        .ok_or_else(|| AppError::Other("文件路径不存在".to_string()))?;
+    Ok(std::path::PathBuf::from(path))
+}
+
+/// 调用系统默认程序打开文件（reveal=true 时在文件管理器中定位该文件）
+fn open_in_system(path: &std::path::Path, reveal: bool) -> AppResult<()> {
+    #[cfg(target_os = "macos")]
+    let result = if reveal {
+        std::process::Command::new("open").arg("-R").arg(path).spawn()
+    } else {
+        std::process::Command::new("open").arg(path).spawn()
+    };
+
+    #[cfg(target_os = "windows")]
+    let result = if reveal {
+        std::process::Command::new("explorer")
+            .arg(format!("/select,\"{}\"", path.display()))
+            .spawn()
+    } else {
+        std::process::Command::new("cmd")
+            .arg("/C")
+            .arg("start")
+            .arg("")
+            .arg(path)
+            .spawn()
+    };
+
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    let result = if reveal {
+        std::process::Command::new("xdg-open")
+            .arg(path.parent().unwrap_or(path))
+            .spawn()
+    } else {
+        std::process::Command::new("xdg-open").arg(path).spawn()
+    };
+
+    result
+        .map(|_| ())
+        .map_err(|e| AppError::Other(format!("无法打开文件: {}", e)))
+}
+
+/// 用系统默认程序打开已传输成功的文件
+#[tauri::command]
+pub async fn open_transfer_file(
+    task_id: Uuid,
+    index: usize,
+    state: State<'_, Arc<AppState>>,
+) -> AppResult<()> {
+    let path = resolve_task_file(task_id, index, state.inner()).await?;
+    if !path.exists() {
+        return Err(AppError::Other(format!(
+            "文件不存在或已被移动: {}",
+            path.display()
+        )));
+    }
+    open_in_system(&path, false)
+}
+
+/// 在文件管理器中打开文件所在文件夹并选中该文件
+#[tauri::command]
+pub async fn reveal_transfer_file(
+    task_id: Uuid,
+    index: usize,
+    state: State<'_, Arc<AppState>>,
+) -> AppResult<()> {
+    let path = resolve_task_file(task_id, index, state.inner()).await?;
+    if !path.exists() {
+        return Err(AppError::Other(format!(
+            "文件不存在或已被移动: {}",
+            path.display()
+        )));
+    }
+    open_in_system(&path, true)
+}
+
 #[derive(Debug, Deserialize)]
 pub struct SendFilesRequest {
     pub device_ids: Vec<Uuid>,

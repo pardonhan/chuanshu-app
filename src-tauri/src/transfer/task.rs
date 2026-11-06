@@ -31,6 +31,8 @@ pub struct TransferTask {
     pub transferred_size: u64,
     pub file_count: u32,
     pub files: Vec<FileMeta>,
+    /// 本地可打开的文件路径：发送任务为源文件，接收任务为落盘后的文件
+    pub file_paths: Vec<String>,
     pub current_file_index: u32,
     pub current_file: String,
     pub speed: u64,
@@ -48,6 +50,8 @@ pub struct TransferTaskInfo {
     pub total_size: u64,
     pub transferred_size: u64,
     pub file_count: u32,
+    /// 本地可打开的文件路径（仅 Completed 任务的接收/发送文件）
+    pub file_paths: Vec<String>,
     pub current_file: String,
     pub speed: u64,
     pub progress: f64,
@@ -75,6 +79,7 @@ impl TransferTask {
             transferred_size: 0,
             file_count,
             files: Vec::new(),
+            file_paths: Vec::new(),
             current_file_index: 0,
             current_file: String::new(),
             speed: 0,
@@ -131,6 +136,7 @@ impl From<&TransferTask> for TransferTaskInfo {
             total_size: task.total_size,
             transferred_size: task.transferred_size,
             file_count: task.file_count,
+            file_paths: task.file_paths.clone(),
             current_file: task.current_file.clone(),
             speed: task.speed,
             progress: task.progress(),

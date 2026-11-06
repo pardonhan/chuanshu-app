@@ -311,6 +311,7 @@ async fn receive_files(
     download_limit: u32,
 ) -> AppResult<()> {
     let mut temp_files: Vec<PathBuf> = Vec::new();
+    let mut saved_paths: Vec<String> = Vec::new();
     let result = receive_files_inner(
         recv,
         request,
@@ -318,6 +319,7 @@ async fn receive_files(
         download_dir,
         download_limit,
         &mut temp_files,
+        &mut saved_paths,
     )
     .await;
 
@@ -325,6 +327,14 @@ async fn receive_files(
         for path in temp_files {
             let _ = tokio::fs::remove_file(&path).await;
         }
+    } else if let Some(arc) = app_state
+        .transfer_tasks
+        .get(&request.task_id)
+        .map(|e| e.value().clone())
+    {
+        // 记录落盘路径，供传输列表「打开文件 / 打开所在文件夹」使用
+        let mut task = arc.lock().await;
+        task.file_paths = saved_paths;
     }
 
     result
@@ -337,6 +347,7 @@ async fn receive_files_inner(
     download_dir: &Path,
     download_limit: u32,
     temp_files: &mut Vec<PathBuf>,
+    saved_paths: &mut Vec<String>,
 ) -> AppResult<()> {
     let limiter = SharedRateLimiter::new(download_limit);
     let mut current: Option<IncomingFile> = None;
@@ -501,6 +512,7 @@ async fn receive_files_inner(
                 drop(file.file);
                 tokio::fs::rename(&file.temp_path, &file.final_path).await?;
                 temp_files.retain(|p| p != &file.temp_path);
+                saved_paths.push(file.final_path.to_string_lossy().to_string());
 
                 finished_files += 1;
                 log::info!("Received file -> {:?}", file.final_path);

@@ -27,6 +27,8 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             get_transfer_tasks,
+            open_transfer_file,
+            reveal_transfer_file,
             send_files,
             cancel_transfer,
             pause_transfer,

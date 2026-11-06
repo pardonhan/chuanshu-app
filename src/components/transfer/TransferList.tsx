@@ -1,12 +1,14 @@
 import { useEffect, useCallback } from 'react'
-import { List, Progress, Button, Space, Tag, Empty } from 'antd'
-import { PauseOutlined, PlayCircleOutlined, CloseOutlined } from '@ant-design/icons'
+import { List, Progress, Button, Space, Tag, Empty, Dropdown, Tooltip, message } from 'antd'
+import { PauseOutlined, PlayCircleOutlined, CloseOutlined, FileOutlined, FolderOpenOutlined } from '@ant-design/icons'
 import { useTransferStore } from '../../store/useTransferStore'
 import {
   getTransferTasks,
   cancelTransfer,
   pauseTransfer,
   resumeTransfer,
+  openTransferFile,
+  revealTransferFile,
   onTransferProgress,
   onTransferCompleted,
   onTransferFailed,
@@ -102,6 +104,32 @@ export default function TransferList() {
     }
   }
 
+  const handleOpenFile = async (taskId: string, index: number) => {
+    try {
+      await openTransferFile(taskId, index)
+    } catch (error) {
+      console.error('Failed to open file:', error)
+      message.error(String(error))
+    }
+  }
+
+  const handleRevealFile = async (taskId: string, index: number) => {
+    try {
+      await revealTransferFile(taskId, index)
+    } catch (error) {
+      console.error('Failed to reveal file:', error)
+      message.error(String(error))
+    }
+  }
+
+  // 多文件时用下拉菜单选择要打开的文件
+  const getFileMenuItems = (task: TransferTaskInfo) =>
+    task.file_paths.map((path, index) => ({
+      key: String(index),
+      label: path.split(/[\\/]/).pop() || path,
+      onClick: () => handleOpenFile(task.task_id, index),
+    }))
+
   const getStatusText = (status: string) => {
     const statusMap: Record<string, { color: string; text: string }> = {
       Pending: { color: 'default', text: '等待中' },
@@ -150,6 +178,34 @@ export default function TransferList() {
                     onClick={() => handleResume(task.task_id)}
                   />
                 ) : null,
+                task.status === 'Completed' && task.file_paths.length > 0 && (
+                  task.file_paths.length === 1 ? (
+                    <Tooltip title="打开文件">
+                      <Button
+                        type="text"
+                        icon={<FileOutlined />}
+                        size="small"
+                        onClick={() => handleOpenFile(task.task_id, 0)}
+                      />
+                    </Tooltip>
+                  ) : (
+                    <Dropdown menu={{ items: getFileMenuItems(task) }} trigger={['click']}>
+                      <Tooltip title="打开文件">
+                        <Button type="text" icon={<FileOutlined />} size="small" />
+                      </Tooltip>
+                    </Dropdown>
+                  )
+                ),
+                task.status === 'Completed' && task.file_paths.length > 0 && (
+                  <Tooltip title="打开所在文件夹">
+                    <Button
+                      type="text"
+                      icon={<FolderOpenOutlined />}
+                      size="small"
+                      onClick={() => handleRevealFile(task.task_id, 0)}
+                    />
+                  </Tooltip>
+                ),
                 task.status !== 'Completed' && task.status !== 'Canceled' && (
                   <Button
                     type="text"

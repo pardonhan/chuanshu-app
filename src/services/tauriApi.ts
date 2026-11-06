@@ -60,6 +60,7 @@ export interface TransferTaskInfo {
   total_size: number
   transferred_size: number
   file_count: number
+  file_paths: string[]
   current_file: string
   speed: number
   progress: number
@@ -120,6 +121,15 @@ export async function pauseTransfer(taskId: string): Promise<void> {
 
 export async function resumeTransfer(taskId: string): Promise<void> {
   return invoke('resume_transfer', { taskId })
+}
+
+// 打开已传输成功的文件 / 所在文件夹
+export async function openTransferFile(taskId: string, index: number): Promise<void> {
+  return invoke('open_transfer_file', { taskId, index })
+}
+
+export async function revealTransferFile(taskId: string, index: number): Promise<void> {
+  return invoke('reveal_transfer_file', { taskId, index })
 }
 
 // 后端限速单位为字节/秒，前端展示与输入使用 MB/s
