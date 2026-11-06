@@ -96,17 +96,24 @@ pub async fn set_auto_launch(enabled: bool, app_handle: tauri::AppHandle) -> App
         let current_exe = std::env::current_exe()?;
         let exe_path = current_exe.to_string_lossy();
 
-        if enabled {
+        let reg_path = "HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+        let output = if enabled {
             // 添加到注册表
-            let reg_path = "HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run";
             Command::new("reg")
                 .args(["add", reg_path, "/v", "ChuanshuApp", "/t", "REG_SZ", "/d", &exe_path, "/f"])
-                .output()?;
+                .output()?
         } else {
             // 从注册表删除
             Command::new("reg")
-                .args(["delete", "HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run", "/v", "ChuanshuApp", "/f"])
-                .output()?;
+                .args(["delete", reg_path, "/v", "ChuanshuApp", "/f"])
+                .output()?
+        };
+
+        if !output.status.success() {
+            return Err(AppError::Other(format!(
+                "设置开机自启失败: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
         }
     }
 

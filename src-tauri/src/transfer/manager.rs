@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use tokio::sync::Mutex;
 use tokio::time::interval;
@@ -19,6 +19,9 @@ use crate::transfer::{TransferStatus, TransferTask, TransferTaskInfo, TransferTy
 pub struct TransferManager {
     app_state: Arc<AppState>,
 }
+
+/// 终态任务在内存中保留的时长，超时后由进度更新器清理
+const RETAIN_FINISHED_TASKS: Duration = Duration::from_secs(600);
 
 impl TransferManager {
     pub fn new(app_state: Arc<AppState>) -> Self {
@@ -112,9 +115,6 @@ impl TransferManager {
                         if canceled {
                             record_history(&task, "canceled", Some(&message));
                             drop(task);
-                            if let Some(handle) = app_state.get_app_handle() {
-                                let _ = crate::ipc::emit_transfer_failed(&handle, task_id, message);
-                            }
                             log::info!("Transfer {} canceled", task_id);
                         } else {
                             task.set_error(message.clone());
@@ -193,8 +193,15 @@ impl TransferManager {
             .map(|entry| entry.value().clone())
         {
             let mut task = arc.lock().await;
-            task.set_status(TransferStatus::Canceled);
-            log::info!("Transfer {} canceled", task_id);
+            if matches!(
+                task.status,
+                TransferStatus::Pending | TransferStatus::Transferring | TransferStatus::Paused
+            ) {
+                task.set_status(TransferStatus::Canceled);
+                log::info!("Transfer {} canceled", task_id);
+            } else {
+                log::debug!("Transfer {} already finished, ignore cancel", task_id);
+            }
         }
         Ok(())
     }
@@ -286,6 +293,8 @@ pub async fn start_progress_updater(app_state: Arc<AppState>) {
     loop {
         ticker.tick().await;
 
+        let mut finished_ids: Vec<Uuid> = Vec::new();
+
         let tasks: Vec<(Uuid, Arc<Mutex<TransferTask>>)> = app_state
             .transfer_tasks
             .iter()
@@ -296,6 +305,19 @@ pub async fn start_progress_updater(app_state: Arc<AppState>) {
             let mut task = arc.lock().await;
 
             if task.status != TransferStatus::Transferring {
+                let is_finished = matches!(
+                    task.status,
+                    TransferStatus::Completed | TransferStatus::Failed | TransferStatus::Canceled
+                );
+                if is_finished
+                    && SystemTime::now()
+                        .duration_since(task.updated_at)
+                        .map(|elapsed| elapsed > RETAIN_FINISHED_TASKS)
+                        .unwrap_or(false)
+                {
+                    finished_ids.push(task_id);
+                }
+
                 previous.remove(&task_id);
                 continue;
             }
@@ -321,6 +343,11 @@ pub async fn start_progress_updater(app_state: Arc<AppState>) {
             previous.insert(task_id, (info.transferred_size, now));
 
             let _ = app_state.emit_async("transfer-progress", &info).await;
+        }
+
+        // 清理超时的终态任务，避免任务表随运行时间无限增长
+        for task_id in finished_ids {
+            app_state.transfer_tasks.remove(&task_id);
         }
     }
 }
