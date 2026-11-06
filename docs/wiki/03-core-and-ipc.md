@@ -1,150 +1,157 @@
-# 03 · 后端 core 与 IPC
+# 03 · 核心层与 IPC
 
-## 1. `core/` 模块
+## 1. AppState
 
-```
-core/
-├── mod.rs          // 模块导出：error / constants / config / app_state
-├── app_state.rs   // 全局共享状态
-├── constants.rs   // 端口、超时、块大小等常量
-├── error.rs       // AppError / AppResult
-└── config.rs      // Settings 与单位转换
-```
+`src-tauri/src/core/app_state.rs` 定义了全应用共享的运行时状态。
 
-`core/mod.rs` 只重导出 `error`、`constants`、`config`、`app_state`；配置结构 `Settings` 位于 `config.rs`，由 SQLite 的 `settings` 表持久化。
-
-### 1.1 `AppError`
-
-[error.rs](../../src-tauri/src/core/error.rs) 用 `thiserror` 定义统一错误，并手动实现 `serde::Serialize`，**把错误序列化为中文字符串**，因此前端 `invoke` 失败时拿到的是可读错误文本。
-
-| 变体 | 来源 | 显示文案 |
+| 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `Io(std::io::Error)` | `#[from]` | `IO错误: ...` |
-| `Network(String)` | 手动构造 | `网络错误: ...` |
-| `Serialization(bincode::Error)` | `#[from]` | `序列化错误: ...` |
-| `JsonSerialization(serde_json::Error)` | `#[from]` | `JSON序列化错误: ...` |
-| `Database(rusqlite::Error)` | `#[from]` | `数据库错误: ...` |
-| `Uuid(uuid::Error)` | `#[from]` | `UUID错误: ...` |
-| `Config(String)` | 手动 | `配置错误: ...` |
-| `DeviceNotFound(String)` | 手动 | `设备未找到: ...` |
-| `TaskNotFound` / `Permission` | 已移除（无调用方） | — |
-| `Other(String)` | 兜底 | `其他错误: ...` |
+| `devices` | `Arc<DashMap<Uuid, DeviceInfo>>` | 当前在线设备；发现包写入，离线清理移出 |
+| `transfer_tasks` | `Arc<DashMap<Uuid, Arc<tokio::sync::Mutex<TransferTask>>>>` | 本次进程创建的所有发送/接收任务，不自动清理 |
+| `device_id` | `Uuid` | 本机 ID，首次启动生成并持久化到 `settings.device_id` |
+| `device_name` | `Arc<RwLock<String>>` | 可在设置中修改；心跳广播读取最新值 |
+| `app_handle` | `Arc<Mutex<Option<tauri::AppHandle>>>` | 后端主动发事件用 |
 
-`pub type AppResult<T> = Result<T, AppError>`。所有 `#[tauri::command]` 返回 `AppResult<T>`，错误会以字符串 reject 到前端。
+方法：
 
-### 1.2 `constants.rs`
+| 方法 | 说明 |
+| --- | --- |
+| `new(device_id, device_name)` | 创建空设备表与任务表 |
+| `device_name()` | 读锁失败时回退 `"我的设备"` |
+| `set_device_name(name)` | 获取写锁后覆盖 |
+| `set_app_handle(handle)` / `get_app_handle()` | 存取 Tauri 句柄 |
+| `emit(event, payload)` | 有句柄时 `handle.emit`；无句柄返回 `Ok(())` |
+| `emit_async(event, payload)` | `emit` 的 async 别名，供异步任务使用 |
 
-完整常量表见 [09-reference.md](./09-reference.md#1-常量表)。此处只列影响行为的项：
+`AppState` 不持有 Tokio Runtime；Runtime 由 `lib.rs` 的 `Arc<Runtime>` 独立持有，仅供关闭窗口时 `block_on` 停止发现服务。
 
-| 常量 | 值 | 用途 |
-| --- | --- | --- |
-| `DISCOVERY_PORT` | 45678 | UDP 发现 |
-| `DISCOVERY_HEARTBEAT_INTERVAL` | 3 s | 广播间隔 |
-| `DISCOVERY_TIMEOUT` | 30 s | 离线判定 |
-| `QUIC_DEFAULT_PORT` | 45679 | QUIC 服务端 |
-| `QUIC_IDLE_TIMEOUT` | 60 s | 连接空闲超时 |
-| `QUIC_KEEP_ALIVE_INTERVAL` | 15 s | 保活 |
-| `MAX_CONCURRENT_TRANSFERS` | 5 | 发送队列的信号量上限 |
-| `TRANSFER_TASK_RETENTION` | 3600 s | 终态任务在内存中的保留时间 |
-| `PROTOCOL_VERSION` | `1.1.0` | 发现包、控制消息、认证统一校验 |
+## 2. AppError
 
-> `SMALL_FILE_THRESHOLD` 仅用于 `FileChunker` 的块大小选择；`MAX_BATCH_*` 与批量传输代码已移除。
+`src-tauri/src/core/error.rs` 使用 `thiserror` 定义统一错误，并手写 `Serialize` 输出中文字符串：
 
-### 1.3 `AppState`
+| 变体 | 来源 |
+| --- | --- |
+| `Io(std::io::Error)` | 文件、网络 socket 的同步 I/O |
+| `Network(String)` | QUIC 连接、流读写等自定义网络错误 |
+| `Serialization(bincode::Error)` | 发现包与传输帧 |
+| `JsonSerialization(serde_json::Error)` | 能力列表 JSON |
+| `Database(rusqlite::Error)` | SQLite |
+| `Uuid(uuid::Error)` | UUID 解析 |
+| `Config(String)` | 非法 IP 等配置问题 |
+| `DeviceNotFound(String)` | 目标设备不在线 |
+| `Permission(String)` | 接收端拒绝传输 |
+| `Other(String)` | 其余业务错误 |
 
-[app_state.rs](../../src-tauri/src/core/app_state.rs)
+`pub type AppResult<T> = Result<T, AppError>`。命令返回 `AppResult<T>`，前端收到的 rejection 就是 `Display` 文本。
 
-| 方法 | 签名 | 说明 |
-| --- | --- | --- |
-| `new` | `fn new(device_name: String) -> Self` | 生成随机 `device_id`，初始化所有容器 |
-| `set_certificate_fingerprint` | `async fn set_certificate_fingerprint(&self, fingerprint: String)` | 写入本机证书指纹 |
-| `certificate_fingerprint` | `async fn certificate_fingerprint(&self) -> Option<String>` | 读取指纹 |
-| `set_app_handle` | `fn set_app_handle(&self, handle: AppHandle)` | setup 阶段注入（此时不在异步上下文） |
-| `emit_async` | `async fn emit_async<T: Serialize + Clone>(&self, event: &str, payload: T) -> AppResult<()>` | 事件发射 |
-| `get_app_handle` | `async fn get_app_handle(&self) -> Option<AppHandle>` | 供传输完成回调使用 |
+## 3. 常量与路径
 
-## 2. `ipc/` 模块
+`src-tauri/src/core/constants.rs`：
 
-[ipc/mod.rs](../../src-tauri/src/ipc/mod.rs) 是 Tauri 命令与系统能力的集合，提供 **19 个命令**；另有 `discover_device_by_ip` 位于 [network/discovery.rs](../../src-tauri/src/network/discovery.rs)，两者合计 **20 个命令**在 [lib.rs](../../src-tauri/src/lib.rs) 中注册。
+| 常量 | 值 |
+| --- | --- |
+| `DISCOVERY_PORT` | `45678` |
+| `DISCOVERY_HEARTBEAT_INTERVAL` | `3`（秒） |
+| `DISCOVERY_TIMEOUT` | `30`（秒） |
+| `QUIC_IDLE_TIMEOUT` | `60`（秒） |
+| `QUIC_KEEP_ALIVE_INTERVAL` | `10`（秒） |
+| `QUIC_DEFAULT_PORT` | `45679` |
+| `DEFAULT_CHUNK_SIZE` | `4 * 1024 * 1024`（字节） |
+| `TRANSFER_PROTOCOL_VERSION` | `2` |
+| `PROTOCOL_VERSION` | `"1.0.0"`（仅用于 UDP 发现包） |
 
-### 2.1 数据结构
+`src-tauri/src/core/mod.rs`：
 
-`Settings` 定义在 [core/config.rs](../../src-tauri/src/core/config.rs)，通过 `crate::core::*` 重导出；`ipc` 与 `storage` 都依赖它，消除了 `storage → ipc` 的反向依赖。
+| 函数 | 行为 |
+| --- | --- |
+| `home_dir()` | 依次读 `USERPROFILE`、`HOME`，都没有则 `"."` |
+| `default_download_dir()` | `home_dir()/Downloads/传书` |
+| `resolve_download_dir(raw)` | 空串返回默认目录；支持 `~/`、`~\`、单独的 `~`；其余按原样 `PathBuf` |
 
-```rust
-pub struct SendFilesRequest { pub device_ids: Vec<Uuid>, pub file_paths: Vec<String> }
+## 4. 命令清单
 
-pub struct Settings {
-    pub device_name: String,
-    pub download_path: String,
-    pub auto_accept: bool,
-    pub upload_limit: u32,     // 单位 MB/s（0 = 不限）
-    pub download_limit: u32,
-    pub enable_notification: bool,
-    pub theme: String,         // "auto" | "light" | "dark"
-}
+`src-tauri/src/lib.rs` 的 `generate_handler!` 恰好注册 15 个命令：
 
-pub struct SystemInfo { os, os_version, arch, default_download_path }
-
-pub struct TransferHistoryQuery { pub limit: i64, pub offset: i64 }
-```
-
-### 2.2 命令清单
-
-| # | 命令 | 参数 | 返回 | 实现要点 |
-| --- | --- | --- | --- | --- |
-| 1 | `get_device_list` | — | `Vec<DeviceInfo>` | 只返回 `is_online()`（`last_seen` 在 30s 内）的设备 |
-| 2 | `get_transfer_tasks` | — | `Vec<TransferTaskInfo>` | 遍历内存任务表，按 `created_at` 倒序 |
-| 3 | `send_files` | `SendFilesRequest` | `Vec<Uuid>` | 委托 `transfer::send_files` |
-| 4 | `cancel_transfer` | `task_id` | `()` | 置 `Canceled` 并通知对端 |
-| 5 | `pause_transfer` | `task_id` | `()` | 置 `Paused` 并通知对端 |
-| 6 | `resume_transfer` | `task_id` | `()` | 置 `Transferring`；发送方会加载断点并重发 |
-| 7 | `accept_transfer_request` | `task_id` | `()` | 从 `pending_transfer_requests` 取出 `oneshot::Sender` 并发送 `true` |
-| 8 | `reject_transfer_request` | `task_id` | `()` | 同上，发送 `false` |
-| 9 | `get_settings` | — | `Settings` | 读 SQLite；无记录时返回默认值 |
-| 10 | `save_settings` | `Settings` | `()` | 逐项写入 `settings` 键值表 |
-| 11 | `discover_device_by_ip` | `ip: String` | `Option<DeviceInfo>` | 见 [04-network-layer.md](./04-network-layer.md#26-手动-ip-发现)；3 秒超时 |
-| 12 | `get_transfer_history` | `TransferHistoryQuery` | `Vec<TransferHistoryEntry>` | `LIMIT/OFFSET` 分页，按创建时间倒序 |
-| 13 | `clear_transfer_history` | — | `()` | `DELETE FROM transfer_history` |
-| 14 | `get_known_devices` | — | `Vec<KnownDevice>` | 按 `last_connected DESC, last_seen DESC` |
-| 15 | `delete_known_device` | `device_id: String` | `()` | 解析 UUID 后删除 |
-| 16 | `get_system_info` | — | `SystemInfo` | Windows 查注册表，Linux 读 `/etc/os-release`，macOS 返回 `macOS` |
-| 17 | `set_auto_launch` | `enabled: bool` | `()` | Windows 注册表 Run；macOS LaunchAgent；Linux `.desktop` |
-| 18 | `get_auto_launch` | — | `bool` | 检查对应自启文件/键是否存在 |
-| 19 | `open_file_location` | `file_path: String` | `()` | 取父目录后 `open` / `explorer` / `xdg-open` |
-| 20 | `resend_files` | `device_ids: Vec<String>`, `file_paths: Vec<String>` | `Vec<String>` | 解析 ID 后复用 `send_files`；内部构建的 `files` 元数据未被使用 |
-
-### 2.3 事件
-
-事件名常量定义在 `ipc/mod.rs` 末尾，部分事件由 `AppState::emit_async` 直接以字符串发射：
-
-| 事件 | 载荷 | 发射位置 | 前端消费 |
+| # | 命令 | 文件 | 签名要点 |
 | --- | --- | --- | --- |
-| `device-online` | `DeviceInfo` | `discovery.rs`（Announce 新设备；Response 新设备或曾离线；`discover_device_by_ip` 成功） | `DeviceList` |
-| `device-offline` | `device_id: Uuid` | `discovery.rs`（Goodbye、30s 超时清理、QUIC 连接关闭回调） | `DeviceList` |
-| `transfer-request` | `TransferRequest` | `quic_server.rs` 收到请求且 `auto_accept=false` | `IncomingTransferRequestModal` |
-| `transfer-progress` | `TransferTaskInfo` | 发送/接收循环每 ≥100ms | `TransferList` |
-| `transfer-completed` | `task_id: Uuid` | 发送成功（`manager.rs`）或接收成功（`quic_server.rs`） | `TransferList` |
-| `transfer-failed` | `{ task_id, error }` | 发送失败（`manager.rs`）或接收失败（`quic_server.rs`） | `TransferList` |
+| 1 | `get_transfer_tasks` | `ipc/mod.rs` | 返回 `Vec<TransferTaskInfo>`，按 `created_at` 降序 |
+| 2 | `send_files` | `ipc/mod.rs` | 入参 `SendFilesRequest`，返回 `Vec<Uuid>` 任务 ID |
+| 3 | `cancel_transfer` | `ipc/mod.rs` | `task_id: Uuid` |
+| 4 | `pause_transfer` | `ipc/mod.rs` | `task_id: Uuid` |
+| 5 | `resume_transfer` | `ipc/mod.rs` | `task_id: Uuid` |
+| 6 | `get_settings` | `ipc/mod.rs` | 返回 `Settings`，无记录时给默认值 |
+| 7 | `save_settings` | `ipc/mod.rs` | 入参 `Settings`，同时更新内存设备名 |
+| 8 | `discover_device_by_ip` | `network/discovery.rs` | `ip: String`，返回 `Option<DeviceInfo>` |
+| 9 | `get_transfer_history` | `ipc/mod.rs` | 入参 `TransferHistoryQuery { limit, offset }` |
+| 10 | `clear_transfer_history` | `ipc/mod.rs` | 清空表 |
+| 11 | `get_known_devices` | `ipc/mod.rs` | 返回 `Vec<KnownDevice>` |
+| 12 | `get_system_info` | `ipc/mod.rs` | 返回 `SystemInfo` |
+| 13 | `set_auto_launch` | `ipc/mod.rs` | `enabled: bool` |
+| 14 | `get_auto_launch` | `ipc/mod.rs` | 返回 `bool` |
+| 15 | `get_local_device_info` | `ipc/mod.rs` | 返回 `{ device_id, device_name }` |
 
-### 2.4 系统能力实现
+### 4.1 传输相关
 
-| 能力 | Windows | macOS | Linux |
-| --- | --- | --- | --- |
-| 开机自启 | `reg add HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v ChuanshuApp` | 写 `~/Library/LaunchAgents/com.chuanshu.app.plist`（`RunAtLoad=true`） | 写 `~/.config/autostart/chuanshu.desktop` |
-| 打开目录 | `explorer <dir>` | `open <dir>` | `xdg-open <dir>` |
-| 系统版本 | PowerShell 查注册表 `ProductName` | 固定 `macOS` | `/etc/os-release` 的 `PRETTY_NAME` |
-| 默认下载路径 | `%USERPROFILE%\Downloads\传书` | `$HOME/Downloads/传书` | `$HOME/Downloads/传书` |
+- `get_transfer_tasks`：遍历 `transfer_tasks`，逐个 `lock().await` 后转成 `TransferTaskInfo`，按 `created_at` 降序返回。任务不会因完成而消失。
+- `send_files`：直接调用 `transfer::send_files(request, state)`，内部由 `TransferManager` 收集文件、为每台在线设备创建任务并 `spawn` 发送。
+- `cancel_transfer` / `pause_transfer` / `resume_transfer`：调用同名领域函数，只修改任务状态，不做额外 IPC 校验。
 
-### 2.5 通知
+### 4.2 设置相关
 
-`send_notification` 先读设置里的 `enable_notification`，为 `false` 时直接返回；否则调用 `tauri_plugin_notification` 显示标题与正文。
+`Settings` 字段：`device_name`、`download_path`、`auto_accept`、`upload_limit`、`download_limit`、`enable_notification`、`theme`。
 
-- `emit_transfer_completed` 会发送「传输完成 / 文件已从 {设备} 接收完成」——该函数实际在**发送方**传输完成后调用，文案与场景不符。
-- 接收端完成时只写历史记录，不调用通知函数。
+- `get_settings`：若 `load_settings()` 返回 `Some` 则原样返回；否则返回默认值——设备名 `"我的设备"`、下载目录 `default_download_dir()`、`auto_accept=true`、限速均为 0、通知开启、主题 `"auto"`。
+- `save_settings`：写库后调用 `state.set_device_name(...)`，因此设备名无需重启即可用于后续心跳。
 
-## 3. 命令注册与权限
+### 4.3 历史与设备
 
-- 插件在 [lib.rs](../../src-tauri/src/lib.rs#L26-L33) 注册：`tauri_plugin_fs`、`notification`、`shell`、`dialog`，debug 模式额外注册 `tauri_plugin_log`。
-- 前端可直接使用的插件能力受 [capabilities/default.json](../../src-tauri/capabilities/default.json) 限制：仅有 `core:default` 与 `dialog:allow-open`。若新增 `shell.open`、通知等前端直调能力，需要同步添加权限。
-- 自定义 IPC 命令不受 capabilities 列表约束（它们通过 `invoke_handler` 暴露）。
+- `get_transfer_history`：需要存储已初始化，否则报 `"Storage not initialized"`；SQL 固定 `ORDER BY created_at DESC`。
+- `clear_transfer_history`：`DELETE FROM transfer_history`。
+- `get_known_devices`：按 `last_connected DESC, last_seen DESC` 返回，包含离线设备。
+- `discover_device_by_ip`：见 [04-network-layer.md](./04-network-layer.md) 的“按 IP 发现”。
+
+### 4.4 系统能力
+
+- `get_system_info`：`os` 取 `std::env::consts::OS`（`windows` / `macos` / `linux`），`arch` 取 `ARCH`；`default_download_path` 为默认下载目录字符串。
+  - Windows：通过 PowerShell 查询注册表 `ProductName`，失败返回 `"Unknown"`。
+  - macOS：固定返回 `"macOS"`，不读取真实版本。
+  - Linux：读 `/etc/os-release` 的 `PRETTY_NAME`，失败返回 `"Linux"`。
+- `set_auto_launch`：
+  - Windows：写/删 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 下的 `ChuanshuApp` 值，数据为当前可执行文件路径。
+  - macOS：写/删 `~/Library/LaunchAgents/com.chuanshu.app.plist`（`RunAtLoad=true`）。
+  - Linux：写/删 `~/.config/autostart/chuanshu.desktop`。
+  - 均通过 `std::fs` / `Command` 实现，不检查返回值是否成功（Windows 的 `reg` 输出被忽略）。
+- `get_auto_launch`：Windows 执行 `reg query` 并看退出码；macOS/Linux 检查对应文件是否存在。
+- `get_local_device_info`：返回内存中的 `device_id` 与当前设备名。
+
+## 5. 事件
+
+后端共发出 5 种事件：
+
+| 事件 | 载荷 | 发射位置 |
+| --- | --- | --- |
+| `device-online` | `DeviceInfo` | `network/discovery.rs`（新设备、重新上线、IP 发现成功） |
+| `device-offline` | `Uuid`（序列化为字符串） | `discovery.rs`（收到 `Goodbye` 或超时清理） |
+| `transfer-progress` | `TransferTaskInfo` | `transfer/manager.rs::start_progress_updater` |
+| `transfer-completed` | `Uuid`（任务 ID 字符串） | `ipc::emit_transfer_completed` |
+| `transfer-failed` | `{ "taskId": Uuid, "error": String }` | `ipc::emit_transfer_failed` |
+
+`ipc/mod.rs` 只把 completed/failed 事件名定义为常量（`TRANSFER_COMPLETED_EVENT`、`TRANSFER_FAILED_EVENT`）；`transfer-progress` 与两个设备事件使用字符串字面量。
+
+`emit_transfer_completed` / `emit_transfer_failed` 在发事件的同时调用 `send_notification`：
+
+- 通知受 `settings.enable_notification` 控制；读不到设置时默认发送。
+- 标题分别为“传输完成”“传输失败”，正文包含对端设备名或错误文本。
+- 使用 `tauri_plugin_notification` 的 `NotificationExt`。
+
+## 6. 插件与权限
+
+`lib.rs` 注册 4 个插件：`tauri_plugin_fs`、`tauri_plugin_notification`、`tauri_plugin_shell`、`tauri_plugin_dialog`；debug 构建额外注册 `tauri_plugin_log`（级别 `Debug`）。
+
+`src-tauri/capabilities/default.json` 只声明：
+
+```json
+["core:default", "dialog:allow-open"]
+```
+
+前端因此只能直接使用核心 API 与“选择文件夹”对话框；通知、shell 等能力均由 Rust 侧调用，不经过前端权限。
