@@ -350,7 +350,7 @@ pub async fn get_settings() -> AppResult<Settings> {
 
     // Return default settings
     Ok(Settings {
-        device_name: "我的设备".to_string(),
+        device_name: crate::core::default_device_name(),
         download_path: crate::core::default_download_dir().to_string_lossy().to_string(),
         auto_accept: true,
         upload_limit: 0,

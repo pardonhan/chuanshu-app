@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Card, Form, Input, Switch, Select, Button, Space, Divider, message, Row, Col, Slider, Alert } from 'antd'
-import { SaveOutlined, FolderOutlined, ReloadOutlined, SafetyCertificateOutlined } from '@ant-design/icons'
+import { FolderOutlined, ReloadOutlined, SafetyCertificateOutlined } from '@ant-design/icons'
 import { getSettings, saveSettings, type Settings, getSystemInfo, type SystemInfo, getAutoLaunch, setAutoLaunch as setAutoLaunchApi, getLocalDeviceInfo, type LocalDeviceInfo, checkDownloadPath, type DownloadPathStatus } from '../services/tauriApi'
 import { open } from '@tauri-apps/plugin-dialog'
 
@@ -37,7 +37,8 @@ const speedMarks = {
 export default function SettingsPage() {
   const [form] = Form.useForm()
   const [isLoading, setIsLoading] = useState(false)
-  const [isSaving, setIsSaving] = useState(false)
+  const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
+  const saveTimer = useRef<number | null>(null)
   const [systemInfo, setSystemInfo] = useState<SystemInfo | null>(null)
   const [localDevice, setLocalDevice] = useState<LocalDeviceInfo | null>(null)
   const [autoLaunch, setAutoLaunch] = useState(false)
@@ -124,7 +125,8 @@ export default function SettingsPage() {
   const handleUseSuggestedPath = () => {
     if (!pathStatus?.suggested_path) return
     form.setFieldValue('download_path', pathStatus.suggested_path)
-    message.info('已填入推荐目录，保存设置后生效')
+    scheduleSave()
+    message.info('已切换为推荐目录，将自动保存')
   }
 
   // Apply theme on mount and when form values change
@@ -135,20 +137,43 @@ export default function SettingsPage() {
     }
   }, [themeValue])
 
-  const onFinish = async (values: Settings) => {
-    setIsSaving(true)
+  // 实际执行保存（由防抖调度触发）
+  const doSave = async (values: Settings) => {
+    setSaveState('saving')
     try {
       await saveSettings(values)
-      // Apply theme after saving
-      applyTheme(values.theme as 'auto' | 'light' | 'dark')
-      message.success('设置已保存')
+      setSaveState('saved')
+      window.setTimeout(() => setSaveState('idle'), 2000)
     } catch (error) {
       console.error('Failed to save settings:', error)
-      message.error('保存设置失败')
-    } finally {
-      setIsSaving(false)
+      setSaveState('error')
+      message.error('自动保存失败，请重试')
     }
   }
+
+  // 值变更后 800ms 防抖自动保存
+  const scheduleSave = () => {
+    if (saveTimer.current) {
+      window.clearTimeout(saveTimer.current)
+    }
+    setSaveState('idle')
+    saveTimer.current = window.setTimeout(async () => {
+      try {
+        const values = await form.validateFields()
+        await doSave(values as Settings)
+      } catch {
+        // 校验失败时不保存，提示用户修正
+        setSaveState('error')
+      }
+    }, 800)
+  }
+
+  // 卸载时清理定时器
+  useEffect(() => {
+    return () => {
+      if (saveTimer.current) window.clearTimeout(saveTimer.current)
+    }
+  }, [])
 
   const handleSelectDownloadPath = async () => {
     try {
@@ -161,6 +186,7 @@ export default function SettingsPage() {
         form.setFieldValue('download_path', selected as string)
         // 选择后立即检测新目录的写权限（系统选择框本身已授予访问权限）
         void checkPath(selected as string, false)
+        scheduleSave()
       }
     } catch (error) {
       console.error('Failed to select download path:', error)
@@ -199,7 +225,7 @@ export default function SettingsPage() {
       <Form
         form={form}
         layout="vertical"
-        onFinish={onFinish}
+        onValuesChange={() => scheduleSave()}
         style={{ maxWidth: 600 }}
         initialValues={{
           upload_limit: 0,
@@ -373,22 +399,12 @@ export default function SettingsPage() {
 
         <Divider />
 
-        <Form.Item>
-          <Space>
-            <Button
-              type="primary"
-              htmlType="submit"
-              icon={<SaveOutlined />}
-              loading={isSaving}
-              size="large"
-            >
-              保存设置
-            </Button>
-            <Button htmlType="reset" onClick={loadSettings} size="large">
-              重置
-            </Button>
-          </Space>
-        </Form.Item>
+        <div style={{ fontSize: 12, color: '#999', minHeight: 20 }}>
+          {saveState === 'saving' && '正在自动保存…'}
+          {saveState === 'saved' && <span style={{ color: '#52c41a' }}>已自动保存</span>}
+          {saveState === 'error' && <span style={{ color: '#ff4d4f' }}>保存失败，请检查输入或稍后重试</span>}
+          {saveState === 'idle' && '修改后将自动保存'}
+        </div>
       </Form>
 
       <Divider />

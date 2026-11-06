@@ -23,6 +23,16 @@ pub fn default_download_dir() -> PathBuf {
     home_dir().join("Downloads").join("传书")
 }
 
+/// 默认设备名：系统主机名；获取失败或为空时回退为「我的设备」
+pub fn default_device_name() -> String {
+    let name = gethostname::gethostname().to_string_lossy().trim().to_string();
+    if name.is_empty() {
+        "我的设备".to_string()
+    } else {
+        name
+    }
+}
+
 /// 解析设置中的下载目录（展开 `~` 前缀）
 pub fn resolve_download_dir(raw: &str) -> PathBuf {
     let trimmed = raw.trim();

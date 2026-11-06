@@ -70,7 +70,7 @@ pub fn run() {
                 .as_ref()
                 .map(|s| s.device_name.clone())
                 .filter(|n| !n.trim().is_empty())
-                .unwrap_or_else(|| "我的设备".to_string());
+                .unwrap_or_else(default_device_name);
             let device_id = storage::get_storage()
                 .and_then(|s| s.get_or_create_device_id().ok())
                 .unwrap_or_else(uuid::Uuid::new_v4);
