@@ -38,6 +38,7 @@ pub fn run() {
             clear_transfer_history,
             get_known_devices,
             get_system_info,
+            check_download_path,
             set_auto_launch,
             get_auto_launch,
             get_local_device_info,
@@ -80,6 +81,25 @@ pub fn run() {
 
             let handle = app.handle().clone();
             let rt_handle = rt.handle().clone();
+
+            // 启动时探测接收目录写权限（macOS 首次访问「下载」目录会触发系统授权弹窗）
+            {
+                let download_path = settings
+                    .as_ref()
+                    .map(|s| s.download_path.clone())
+                    .unwrap_or_default();
+                rt_handle.spawn_blocking(move || {
+                    let dir = if download_path.trim().is_empty() {
+                        default_download_dir()
+                    } else {
+                        resolve_download_dir(&download_path)
+                    };
+                    match ensure_dir_writable(&dir) {
+                        Ok(()) => log::info!("下载目录可写: {:?}", dir),
+                        Err(e) => log::warn!("下载目录不可写 {:?}: {}", dir, e),
+                    }
+                });
+            }
 
             // Start discovery service
             {

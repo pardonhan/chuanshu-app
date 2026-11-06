@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
-import { Card, Form, Input, Switch, Select, Button, Space, Divider, message, Row, Col, Slider } from 'antd'
-import { SaveOutlined, FolderOutlined, ReloadOutlined } from '@ant-design/icons'
-import { getSettings, saveSettings, type Settings, getSystemInfo, type SystemInfo, getAutoLaunch, setAutoLaunch as setAutoLaunchApi, getLocalDeviceInfo, type LocalDeviceInfo } from '../services/tauriApi'
+import { Card, Form, Input, Switch, Select, Button, Space, Divider, message, Row, Col, Slider, Alert } from 'antd'
+import { SaveOutlined, FolderOutlined, ReloadOutlined, SafetyCertificateOutlined } from '@ant-design/icons'
+import { getSettings, saveSettings, type Settings, getSystemInfo, type SystemInfo, getAutoLaunch, setAutoLaunch as setAutoLaunchApi, getLocalDeviceInfo, type LocalDeviceInfo, checkDownloadPath, type DownloadPathStatus } from '../services/tauriApi'
 import { open } from '@tauri-apps/plugin-dialog'
 
 const { Option } = Select
@@ -41,6 +41,8 @@ export default function SettingsPage() {
   const [systemInfo, setSystemInfo] = useState<SystemInfo | null>(null)
   const [localDevice, setLocalDevice] = useState<LocalDeviceInfo | null>(null)
   const [autoLaunch, setAutoLaunch] = useState(false)
+  const [pathStatus, setPathStatus] = useState<DownloadPathStatus | null>(null)
+  const [isCheckingPath, setIsCheckingPath] = useState(false)
 
   useEffect(() => {
     loadSystemInfo()
@@ -82,12 +84,47 @@ export default function SettingsPage() {
       form.setFieldsValue(settings)
       // Apply theme setting
       applyTheme(settings.theme as 'auto' | 'light' | 'dark')
+      // 加载后自动检测一次下载目录权限（macOS 首次会触发系统授权弹窗）
+      void checkPath(settings.download_path, false)
     } catch (error) {
       console.error('Failed to load settings:', error)
       message.error('加载设置失败')
     } finally {
       setIsLoading(false)
     }
+  }
+
+  // 检测下载目录写权限；silent=false 时给出用户反馈
+  const checkPath = async (path?: string, notify = true) => {
+    setIsCheckingPath(true)
+    try {
+      const status = await checkDownloadPath(path)
+      setPathStatus(status)
+      if (notify) {
+        if (status.writable) {
+          message.success(`下载目录可写：${status.path}`)
+        } else {
+          message.error('下载目录不可写，请按提示授权或更换目录')
+        }
+      }
+      return status
+    } catch (error) {
+      console.error('Failed to check download path:', error)
+      if (notify) message.error('检测下载目录失败')
+      return null
+    } finally {
+      setIsCheckingPath(false)
+    }
+  }
+
+  const handleCheckDownloadPath = async () => {
+    await checkPath(form.getFieldValue('download_path'))
+  }
+
+  const handleUseSuggestedPath = () => {
+    if (!pathStatus?.suggested_path) return
+    form.setFieldValue('download_path', pathStatus.suggested_path)
+    message.info('已填入推荐目录，保存设置后生效')
   }
 
   // Apply theme on mount and when form values change
@@ -122,6 +159,8 @@ export default function SettingsPage() {
       })
       if (selected) {
         form.setFieldValue('download_path', selected as string)
+        // 选择后立即检测新目录的写权限（系统选择框本身已授予访问权限）
+        void checkPath(selected as string, false)
       }
     } catch (error) {
       console.error('Failed to select download path:', error)
@@ -197,7 +236,7 @@ export default function SettingsPage() {
         >
           <Input.Group compact>
             <Input
-              style={{ width: 'calc(100% - 100px)' }}
+              style={{ width: 'calc(100% - 180px)' }}
               placeholder="文件接收后的保存路径"
               value={Form.useWatch('download_path', form)}
               onChange={(e) => form.setFieldValue('download_path', e.target.value)}
@@ -205,8 +244,37 @@ export default function SettingsPage() {
             <Button icon={<FolderOutlined />} onClick={handleSelectDownloadPath}>
               浏览
             </Button>
+            <Button
+              icon={<SafetyCertificateOutlined />}
+              onClick={handleCheckDownloadPath}
+              loading={isCheckingPath}
+            >
+              检测权限
+            </Button>
           </Input.Group>
         </Form.Item>
+
+        {pathStatus && !pathStatus.writable && (
+          <Alert
+            style={{ marginTop: -8, marginBottom: 16 }}
+            type="error"
+            showIcon
+            message="下载目录不可写"
+            description={
+              <div>
+                <div>{pathStatus.message}</div>
+                {pathStatus.suggested_path && (
+                  <div style={{ marginTop: 8 }}>
+                    推荐改用：<code>{pathStatus.suggested_path}</code>
+                    <Button type="link" size="small" onClick={handleUseSuggestedPath}>
+                      使用该目录
+                    </Button>
+                  </div>
+                )}
+              </div>
+            }
+          />
+        )}
 
         <div style={{ marginBottom: 16, fontSize: 16, fontWeight: 500, borderBottom: '1px solid #e8e8e8', paddingBottom: 8 }}>
           系统设置

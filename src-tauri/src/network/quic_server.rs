@@ -129,7 +129,7 @@ async fn handle_transfer(
         .unwrap_or_default();
     let download_limit = settings.as_ref().map(|s| s.download_limit).unwrap_or(0);
 
-    let mut download_dir = if download_path.trim().is_empty() {
+    let configured_dir = if download_path.trim().is_empty() {
         default_download_dir()
     } else {
         resolve_download_dir(&download_path)
@@ -147,19 +147,26 @@ async fn handle_transfer(
         return Ok(());
     }
 
-    // 确保接收目录可用：配置目录创建失败时回退到默认目录，仍失败则明确回执给发送端
-    if let Err(e) = std::fs::create_dir_all(&download_dir) {
-        let fallback = default_download_dir();
-        log::warn!(
-            "无法创建接收目录 {:?}: {}，改用默认目录 {:?}",
-            download_dir,
-            e,
-            fallback
-        );
-        download_dir = fallback;
+    // 确保接收目录可用：配置目录不可写时依次回退到默认下载目录与应用数据目录
+    let mut candidates = vec![configured_dir.clone()];
+    let default_dir = default_download_dir();
+    if !candidates.contains(&default_dir) {
+        candidates.push(default_dir);
+    }
+    if let Some(fallback) = crate::core::app_data_download_dir(&app_state) {
+        if !candidates.contains(&fallback) {
+            candidates.push(fallback);
+        }
+    }
 
-        if let Err(e) = std::fs::create_dir_all(&download_dir) {
-            let reason = format!("接收端无法创建保存目录 {:?}: {}", download_dir, e);
+    let download_dir = match crate::core::first_writable_dir(&candidates) {
+        Some(dir) => dir,
+        None => {
+            let reason = format!(
+                "接收端没有可写的保存目录（已尝试 {:?}）。{}",
+                candidates,
+                crate::core::permission_hint()
+            );
             log::error!("{}", reason);
 
             let response = TransferResponse {
@@ -172,6 +179,14 @@ async fn handle_transfer(
             let _ = send.finish().await;
             return Ok(());
         }
+    };
+
+    if download_dir != configured_dir {
+        log::warn!(
+            "配置的下载目录 {:?} 不可写，本次改存到 {:?}",
+            configured_dir,
+            download_dir
+        );
     }
 
     let response = TransferResponse {

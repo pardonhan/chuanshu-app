@@ -15,6 +15,63 @@ pub struct SystemInfo {
     pub default_download_path: String,
 }
 
+/// 下载目录权限检测结果
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DownloadPathStatus {
+    /// 实际检测的目录（已展开 `~`）
+    pub path: String,
+    /// 是否可写
+    pub writable: bool,
+    /// 不可写时的原因与处理建议
+    pub message: Option<String>,
+    /// 可自动切换到的兜底目录
+    pub suggested_path: Option<String>,
+}
+
+/// 检测并尝试自动获取下载目录的写权限。
+/// macOS 下首次访问「下载」目录会触发系统授权弹窗；配置目录不可写时返回可用的兜底目录。
+#[tauri::command]
+pub async fn check_download_path(
+    path: Option<String>,
+    state: State<'_, Arc<AppState>>,
+) -> AppResult<DownloadPathStatus> {
+    let configured_dir = path
+        .as_deref()
+        .map(resolve_download_dir)
+        .unwrap_or_else(default_download_dir);
+
+    if let Err(e) = ensure_dir_writable(&configured_dir) {
+        log::warn!("下载目录不可写 {:?}: {}", configured_dir, e);
+
+        let mut candidates = vec![default_download_dir()];
+        if let Some(fallback) = app_data_download_dir(state.inner()) {
+            if !candidates.contains(&fallback) {
+                candidates.push(fallback);
+            }
+        }
+        let suggested = first_writable_dir(&candidates);
+
+        return Ok(DownloadPathStatus {
+            path: configured_dir.to_string_lossy().to_string(),
+            writable: false,
+            message: Some(format!(
+                "无法写入 {:?}：{}。{}",
+                configured_dir,
+                e,
+                permission_hint()
+            )),
+            suggested_path: suggested.map(|p| p.to_string_lossy().to_string()),
+        });
+    }
+
+    Ok(DownloadPathStatus {
+        path: configured_dir.to_string_lossy().to_string(),
+        writable: true,
+        message: None,
+        suggested_path: None,
+    })
+}
+
 /// 获取系统信息
 #[tauri::command]
 pub async fn get_system_info() -> AppResult<SystemInfo> {

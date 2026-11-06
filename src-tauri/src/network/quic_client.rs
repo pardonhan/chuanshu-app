@@ -62,7 +62,7 @@ pub async fn send_transfer(
         let reason = response.reason.unwrap_or_else(|| "接收端拒绝了本次传输".to_string());
         connection.close(0u32.into(), b"rejected");
         update_task(&app_state, task_id, |task| task.set_error(reason.clone())).await;
-        return Err(AppError::Permission(reason));
+        return Err(AppError::Rejected(reason));
     }
 
     // 标记为传输中（取消状态不被覆盖）

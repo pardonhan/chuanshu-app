@@ -179,6 +179,18 @@ export async function getSystemInfo(): Promise<SystemInfo> {
   return invoke('get_system_info')
 }
 
+// 下载目录权限检测
+export interface DownloadPathStatus {
+  path: string
+  writable: boolean
+  message: string | null
+  suggested_path: string | null
+}
+
+export async function checkDownloadPath(path?: string): Promise<DownloadPathStatus> {
+  return invoke('check_download_path', { path: path ?? null })
+}
+
 export async function setAutoLaunch(enabled: boolean): Promise<void> {
   return invoke('set_auto_launch', { enabled })
 }
