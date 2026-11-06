@@ -60,11 +60,14 @@ export default function FileDropZone({ selectedDeviceId }: FileDropZoneProps) {
   }
 
   useEffect(() => {
+    let unlisten: (() => void) | null = null
+    let disposed = false
+
     // Listen for Tauri file drop events using Tauri v2 API
     const setupDragDrop = async () => {
       try {
         const appWindow = getCurrentWebviewWindow()
-        const unlisten = await appWindow.onDragDropEvent((event: { payload: DragDropEvent }) => {
+        const stop = await appWindow.onDragDropEvent((event: { payload: DragDropEvent }) => {
           if (event.payload.type === 'drop') {
             // User dropped files
             handleFileDrop(event.payload.paths)
@@ -73,13 +76,23 @@ export default function FileDropZone({ selectedDeviceId }: FileDropZoneProps) {
           // 'leave' - user cancelled the drag operation
         })
 
-        return unlisten
+        // 切换选中设备时该 effect 会重新执行，先注销旧监听，避免重复注册
+        if (disposed) {
+          stop()
+        } else {
+          unlisten = stop
+        }
       } catch (error) {
         console.error('Failed to setup drag-drop:', error)
       }
     }
 
     setupDragDrop()
+
+    return () => {
+      disposed = true
+      unlisten?.()
+    }
   }, [handleFileDrop])
 
   const handleRemoveFile = (index: number) => {

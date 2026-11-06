@@ -83,7 +83,7 @@ cargo clippy --all-targets --all-features
 
 | 变量 | 作用 |
 | --- | --- |
-| `CHUANSHU_DATA_DIR` | 覆盖数据目录，主要用于同机双开测试 |
+| `CHUANSHU_DATA_DIR` | 覆盖数据目录（隔离设备 ID、设置与数据库） |
 | `VITE_*` / `TAURI_*` | Vite `envPrefix` 声明的前端环境变量前缀 |
 
 同机双开示例（PowerShell）：
@@ -93,7 +93,7 @@ $env:CHUANSHU_DATA_DIR = "D:\tmp\chuanshu-b"
 pnpm tauri dev
 ```
 
-第二个实例会使用独立的数据库、设备 ID 与设置。注意两端仍会争用 `45678` / `45679`：发现 socket 在 macOS 上额外启用了 `SO_REUSEPORT`，Windows/Linux 只设置 `SO_REUSEADDR`；QUIC 服务端第二次绑定同一端口会失败并记录 `QUIC service failed to start`。
+第二个实例会使用独立的数据库、设备 ID 与设置，但**不切换端口**：两端仍会争用 `45678` / `45679`（发现 socket 在 macOS 上额外启用 `SO_REUSEPORT`，Windows/Linux 只设置 `SO_REUSEADDR`，QUIC 服务端第二次绑定必然失败并记录 `QUIC service failed to start`）。因此同机双开只能验证前端与数据层，真正的收发联调请用两台设备或虚拟机。
 
 ## 7. 常见问题
 

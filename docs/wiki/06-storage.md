@@ -14,7 +14,7 @@
 - 初始化时先 `create_dir_all`，再 `Connection::open`，随后 `init_tables()`。
 - 全局句柄：`static STORAGE: OnceCell<Mutex<Storage>>`；`init_storage` 重复调用返回“Storage already initialized”，`get_storage()` 返回 `Option<MutexGuard<'static, Storage>>`。
 
-`CHUANSHU_DATA_DIR` 的主要用途是同机双开测试：给第二个实例指定独立目录，避免设备 ID、设置与数据库互相覆盖。
+`CHUANSHU_DATA_DIR` 的主要用途是隔离第二个实例的设备 ID、设置与数据库。它只切换数据目录、不切换端口（45678 / 45679），同机双开时第二个实例的 QUIC 服务端会绑定失败，完整联调仍建议用两台设备。
 
 ## 2. 表结构
 

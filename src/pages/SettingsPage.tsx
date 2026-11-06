@@ -327,21 +327,13 @@ export default function SettingsPage() {
 
       <div style={{ color: '#999', fontSize: 12 }}>
         <Row gutter={16}>
-          <Col span={12}>
+          <Col span={24}>
             <p><strong>温馨提示：</strong></p>
             <ul style={{ margin: 0, paddingLeft: 20 }}>
               <li>设备名称保存后立即生效，无需重启</li>
               <li>下载路径可以随时修改，不影响已进行的传输</li>
               <li>速度限制仅对新的传输任务生效</li>
               <li>Windows 和 macOS 的开机自启机制不同，请确保应用安装在系统盘</li>
-            </ul>
-          </Col>
-          <Col span={12}>
-            <p><strong>快捷键：</strong></p>
-            <ul style={{ margin: 0, paddingLeft: 20 }}>
-              <li>Ctrl/Cmd + V：粘贴文件路径</li>
-              <li>Ctrl/Cmd + R：刷新设备列表</li>
-              <li>Ctrl/Cmd + ,：打开设置</li>
             </ul>
           </Col>
         </Row>
