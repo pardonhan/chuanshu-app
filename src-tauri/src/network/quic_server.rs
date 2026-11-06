@@ -129,7 +129,7 @@ async fn handle_transfer(
         .unwrap_or_default();
     let download_limit = settings.as_ref().map(|s| s.download_limit).unwrap_or(0);
 
-    let download_dir = if download_path.trim().is_empty() {
+    let mut download_dir = if download_path.trim().is_empty() {
         default_download_dir()
     } else {
         resolve_download_dir(&download_path)
@@ -147,7 +147,32 @@ async fn handle_transfer(
         return Ok(());
     }
 
-    std::fs::create_dir_all(&download_dir)?;
+    // 确保接收目录可用：配置目录创建失败时回退到默认目录，仍失败则明确回执给发送端
+    if let Err(e) = std::fs::create_dir_all(&download_dir) {
+        let fallback = default_download_dir();
+        log::warn!(
+            "无法创建接收目录 {:?}: {}，改用默认目录 {:?}",
+            download_dir,
+            e,
+            fallback
+        );
+        download_dir = fallback;
+
+        if let Err(e) = std::fs::create_dir_all(&download_dir) {
+            let reason = format!("接收端无法创建保存目录 {:?}: {}", download_dir, e);
+            log::error!("{}", reason);
+
+            let response = TransferResponse {
+                task_id: request.task_id,
+                accepted: false,
+                reason: Some(reason),
+                save_path: None,
+            };
+            let _ = write_serialized(&mut send, &response).await;
+            let _ = send.finish().await;
+            return Ok(());
+        }
+    }
 
     let response = TransferResponse {
         task_id: request.task_id,

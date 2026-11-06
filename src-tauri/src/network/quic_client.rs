@@ -55,7 +55,8 @@ pub async fn send_transfer(
         read_serialized(&mut recv, MAX_CONTROL_FRAME_SIZE),
     )
     .await
-    .map_err(|_| AppError::Network("等待接收端响应超时".to_string()))??;
+    .map_err(|_| AppError::Network("等待接收端响应超时".to_string()))?
+    .map_err(|e| AppError::Network(format!("接收端未响应，连接已断开（{}）", e)))?;
 
     if !response.accepted {
         let reason = response.reason.unwrap_or_else(|| "接收端拒绝了本次传输".to_string());
