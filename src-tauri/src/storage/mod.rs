@@ -132,6 +132,7 @@ impl Storage {
         self.save_setting("download_limit", &settings.download_limit.to_string())?;
         self.save_setting("enable_notification", &settings.enable_notification.to_string())?;
         self.save_setting("theme", &settings.theme)?;
+        self.save_setting("minimize_to_tray", &settings.minimize_to_tray.to_string())?;
         Ok(())
     }
 
@@ -159,6 +160,7 @@ impl Storage {
             download_limit: parse_u32(self.get_setting("download_limit")?),
             enable_notification: parse_bool(self.get_setting("enable_notification")?, true),
             theme: self.get_setting("theme")?.unwrap_or_else(|| "auto".to_string()),
+            minimize_to_tray: parse_bool(self.get_setting("minimize_to_tray")?, true),
         }))
     }
 

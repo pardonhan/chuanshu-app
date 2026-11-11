@@ -232,6 +232,7 @@ export default function SettingsPage() {
           download_limit: 0,
           auto_accept: true,
           enable_notification: true,
+          minimize_to_tray: true,
           theme: 'auto',
         }}
       >
@@ -308,6 +309,15 @@ export default function SettingsPage() {
 
         <Form.Item label="开机自启" extra={<span style={{ color: '#999', fontSize: '12px' }}>启用后应用将随系统自动启动</span>}>
           <Switch checked={autoLaunch} onChange={handleAutoLaunchChange} />
+        </Form.Item>
+
+        <Form.Item
+          label="关闭窗口时最小化到托盘"
+          name="minimize_to_tray"
+          valuePropName="checked"
+          extra="启用后关闭主窗口会隐藏到系统托盘，应用继续在后台运行并接收文件"
+        >
+          <Switch />
         </Form.Item>
 
         <Form.Item label="系统信息" extra={<span style={{ color: '#999', fontSize: '12px' }}>{getSystemLabel()}</span>}>

@@ -212,6 +212,17 @@ async fn handle_transfer(
         .transfer_tasks
         .insert(request.task_id, Arc::new(Mutex::new(task)));
 
+    // 通知前端与系统：收到来自他人的文件传输
+    if let Some(handle) = app_state.get_app_handle() {
+        crate::ipc::emit_incoming_transfer(
+            &handle,
+            request.task_id,
+            &request.sender_name,
+            request.files.len() as u32,
+            request.total_size,
+        );
+    }
+
     let result = receive_files(&mut recv, &request, &app_state, &download_dir, download_limit).await;
 
     match result {

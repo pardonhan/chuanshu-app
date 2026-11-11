@@ -1,4 +1,4 @@
-import { ConfigProvider, theme } from 'antd'
+import { ConfigProvider, theme, notification } from 'antd'
 import zhCN from 'antd/locale/zh_CN'
 import { useState, useEffect } from 'react'
 import { Layout } from 'antd'
@@ -6,7 +6,8 @@ import Sidebar from './components/layout/Sidebar'
 import HomePage from './pages/HomePage'
 import HistoryPage from './pages/HistoryPage'
 import SettingsPage from './pages/SettingsPage'
-import { getSettings } from './services/tauriApi'
+import { getSettings, onIncomingTransfer } from './services/tauriApi'
+import type { UnlistenFn } from '@tauri-apps/api/event'
 
 const { Sider, Content } = Layout
 
@@ -68,6 +69,28 @@ function App() {
     // You can add custom event listener here if needed
     handleThemeChange()
   }, [currentPage])
+
+  // 收到他人发来的文件时，在应用内弹出通知（同时后端会发系统通知）
+  useEffect(() => {
+    let unlisten: UnlistenFn | null = null
+    const setup = async () => {
+      unlisten = await onIncomingTransfer((payload) => {
+        const desc =
+          payload.file_count <= 1
+            ? `${payload.sender_name} 发来一个文件`
+            : `${payload.sender_name} 发来 ${payload.file_count} 个文件`
+        notification.info({
+          message: '收到文件传输',
+          description: desc,
+          duration: 6,
+        })
+      })
+    }
+    setup()
+    return () => {
+      unlisten?.()
+    }
+  }, [])
 
   return (
     <ConfigProvider

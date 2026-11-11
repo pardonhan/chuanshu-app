@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::Manager;
 use tokio::runtime::Runtime;
@@ -12,6 +13,9 @@ mod ipc;
 use core::*;
 use network::*;
 use ipc::*;
+
+/// 是否正在退出（托盘「退出」菜单触发）。为 true 时窗口关闭才会真正停止服务并退出进程。
+static SHOULD_QUIT: AtomicBool = AtomicBool::new(false);
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -132,15 +136,69 @@ pub fn run() {
                 });
             }
 
+            // 系统托盘：关闭窗口时最小化到托盘，通过托盘菜单显示主窗口或退出
+            {
+                use tauri::menu::{Menu, MenuItem};
+                use tauri::tray::TrayIconBuilder;
+
+                let rt_for_tray = rt.clone();
+                let show_item = MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>)?;
+                let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+                let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
+
+                let icon = app
+                    .default_window_icon()
+                    .cloned()
+                    .ok_or_else(|| AppError::Other("缺少应用图标".to_string()))?;
+
+                let _tray = TrayIconBuilder::with_id("main-tray")
+                    .icon(icon)
+                    .tooltip("传书 - 局域网文件传输")
+                    .menu(&menu)
+                    .show_menu_on_left_click(false)
+                    .on_menu_event(move |app, event| match event.id().as_ref() {
+                        "show" => {
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                            }
+                        }
+                        "quit" => {
+                            SHOULD_QUIT.store(true, Ordering::SeqCst);
+                            network::stop_quic_server();
+                            let _ = rt_for_tray.block_on(async {
+                                network::stop_discovery_service().await
+                            });
+                            app.exit(0);
+                        }
+                        _ => {}
+                    })
+                    .build(app)?;
+            }
+
             Ok(())
         })
-        .on_window_event(move |_window, event| {
-            if let tauri::WindowEvent::CloseRequested { .. } = event {
-                log::info!("Window closing, stopping services...");
-                rt_for_cleanup.block_on(async {
-                    network::stop_discovery_service().await.ok();
-                });
-                network::stop_quic_server();
+        .on_window_event(move |window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let should_quit = SHOULD_QUIT.load(Ordering::SeqCst);
+
+                // 读取「关闭窗口时最小化到托盘」设置，未设置时默认为 true
+                let minimize_to_tray = storage::get_storage()
+                    .and_then(|s| s.load_settings().ok().flatten())
+                    .map(|s| s.minimize_to_tray)
+                    .unwrap_or(true);
+
+                if should_quit || !minimize_to_tray {
+                    log::info!("Window closing, stopping services...");
+                    rt_for_cleanup.block_on(async {
+                        network::stop_discovery_service().await.ok();
+                    });
+                    network::stop_quic_server();
+                } else {
+                    api.prevent_close();
+                    let _ = window.hide();
+                    log::info!("Window hidden to system tray, services keep running");
+                }
             }
         })
         .run(tauri::generate_context!())

@@ -77,6 +77,7 @@ export interface Settings {
   download_limit: number
   enable_notification: boolean
   theme: 'auto' | 'light' | 'dark'
+  minimize_to_tray: boolean
 }
 
 // Transfer history type
@@ -236,6 +237,20 @@ export function onTransferCompleted(callback: (taskId: string) => void): Promise
 
 export function onTransferFailed(callback: (payload: { taskId: string; error: string }) => void): Promise<UnlistenFn> {
   return listen('transfer-failed', (event: Event<{ taskId: string; error: string }>) => {
+    callback(event.payload)
+  })
+}
+
+// 收到他人发来的文件传输
+export interface IncomingTransferPayload {
+  task_id: string
+  sender_name: string
+  file_count: number
+  total_size: number
+}
+
+export function onIncomingTransfer(callback: (payload: IncomingTransferPayload) => void): Promise<UnlistenFn> {
+  return listen('incoming-transfer', (event: Event<IncomingTransferPayload>) => {
     callback(event.payload)
   })
 }

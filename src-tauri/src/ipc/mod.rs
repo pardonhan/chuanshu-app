@@ -433,6 +433,8 @@ pub struct Settings {
     pub download_limit: u32,
     pub enable_notification: bool,
     pub theme: String,
+    /// 关闭窗口时是否最小化到系统托盘（默认 true，保持后台常驻）
+    pub minimize_to_tray: bool,
 }
 
 #[tauri::command]
@@ -452,6 +454,7 @@ pub async fn get_settings() -> AppResult<Settings> {
         download_limit: 0,
         enable_notification: true,
         theme: "auto".to_string(),
+        minimize_to_tray: true,
     })
 }
 
@@ -498,6 +501,16 @@ pub async fn get_known_devices() -> AppResult<Vec<KnownDevice>> {
 /// Event names for frontend communication
 pub const TRANSFER_COMPLETED_EVENT: &str = "transfer-completed";
 pub const TRANSFER_FAILED_EVENT: &str = "transfer-failed";
+pub const INCOMING_TRANSFER_EVENT: &str = "incoming-transfer";
+
+/// 收到他人发来的文件传输时推送给前端的载荷
+#[derive(Debug, Serialize, Clone)]
+pub struct IncomingTransferPayload {
+    pub task_id: Uuid,
+    pub sender_name: String,
+    pub file_count: u32,
+    pub total_size: u64,
+}
 
 /// Send system notification
 pub fn send_notification(app_handle: &tauri::AppHandle, title: &str, body: &str) {
@@ -539,4 +552,28 @@ pub fn emit_transfer_failed(handle: &tauri::AppHandle, task_id: Uuid, error: Str
 
     // Send system notification
     send_notification(handle, "传输失败", &format!("文件传输失败：{}", error));
+}
+
+/// 收到他人发来的文件传输时：推送事件给前端弹窗，并发送系统通知
+pub fn emit_incoming_transfer(
+    handle: &tauri::AppHandle,
+    task_id: Uuid,
+    sender_name: &str,
+    file_count: u32,
+    total_size: u64,
+) {
+    let payload = IncomingTransferPayload {
+        task_id,
+        sender_name: sender_name.to_string(),
+        file_count,
+        total_size,
+    };
+    let _ = handle.emit(INCOMING_TRANSFER_EVENT, &payload);
+
+    let body = if file_count <= 1 {
+        format!("来自 {} 的文件传输", sender_name)
+    } else {
+        format!("来自 {} 的 {} 个文件", sender_name, file_count)
+    };
+    send_notification(handle, "收到文件传输", &body);
 }
