@@ -75,8 +75,9 @@
 | `transfer-progress` | `TransferTaskInfo` | `manager.rs` |
 | `transfer-completed` | 任务 ID 字符串 | `ipc::emit_transfer_completed` |
 | `transfer-failed` | `{ "taskId": 字符串, "error": 字符串 }` | `ipc::emit_transfer_failed` |
+| `incoming-transfer` | `{ task_id, sender_name, file_count, total_size }` | `ipc::emit_incoming_transfer`（`quic_server.rs` 接受后调用） |
 
-不存在“接收请求确认”事件；`auto_accept=false` 时接收端直接拒绝。
+不存在“接收请求确认/接受拒绝”事件；`auto_accept=false` 时接收端直接拒绝。`incoming-transfer` 仅用于「已开始接收」的提示。
 
 ## 4. 类型映射
 

@@ -111,7 +111,7 @@ sequenceDiagram
 ### 4.4 `src-tauri/capabilities/default.json`
 
 ```json
-{ "identifier": "default", "windows": ["main"], "permissions": ["core:default", "dialog:allow-open"] }
+{ "identifier": "default", "windows": ["main"], "permissions": ["core:default", "dialog:allow-open", "notification:allow-notify"] }
 ```
 
 新增前端插件调用（fs/shell/notification）时必须在此追加权限，否则运行时报 “not allowed”。

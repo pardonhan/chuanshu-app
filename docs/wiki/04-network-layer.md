@@ -179,7 +179,7 @@ sequenceDiagram
 - 版本不匹配时返回拒绝响应，`reason` 含两端版本号，然后 `finish()` 流并结束。
 - `auto_accept=false` 时直接拒绝，原因“接收端已关闭自动接收”；没有前端确认弹窗流程。
 - 下载目录：`download_path` 为空则 `default_download_dir()`，否则 `resolve_download_dir()`；接收前 `create_dir_all`。
-- 接收任务在发出接受响应后创建，`TransferType::Receive`，初始 `Transferring`。
+- 接收任务在发出接受响应后创建，`TransferType::Receive`，初始 `Transferring`；创建后立即 `emit_incoming_transfer`，向前端推 `incoming-transfer` 事件并发「收到文件传输」系统通知。
 - 临时文件命名 `.{task_id}.{file_id}.part`，成功后 `rename` 到 `unique_path()` 计算出的最终路径；失败时删除全部未完成临时文件。
 - 重名文件追加 ` (n)` 序号，最多尝试 9999 次。
 - 路径安全：`build_safe_target()` 拒绝 `..`、含 `:` 的路径段、空文件名、含分隔符或 `:` 的文件名；随后对父目录做 `canonicalize`，要求仍以下载目录为前缀。

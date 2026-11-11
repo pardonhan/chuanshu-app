@@ -314,7 +314,7 @@ sequenceDiagram
 1. 解析 `TransferRequest`。
 2. `auto_accept` 从设置读取（默认 false，读不到视为拒绝）。
 3. 回 `TransferResponse`，`save_path` **硬编码** `"~/Downloads/传书"`。
-4. 若接受：创建 `TransferType::Receive` 任务并插入全局任务表，然后 **在同一条流的 `recv` 上调用 `receive_files`**。
+4. 若接受：创建 `TransferType::Receive` 任务并插入全局任务表，随后调用 `emit_incoming_transfer`（`incoming-transfer` 事件 + 系统通知），然后 **在同一条流的 `recv` 上调用 `receive_files`**。
 5. 完成后：状态 `Completed`、写历史（`"receive"/"completed"`）、`emit_transfer_completed`；失败则 `set_error` + 写 `"failed"` + `emit_transfer_failed`。
 
 ### 5.5 `receive_files`（落盘）

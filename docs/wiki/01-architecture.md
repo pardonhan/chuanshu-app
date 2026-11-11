@@ -211,7 +211,8 @@ sequenceDiagram
 2. **设备身份先就绪**：`device_id` 来自 SQLite，设备名来自 `settings.device_name`，空白则回退 `"我的设备"`。
 3. **发现与 QUIC 并行启动**：两者都在 setup 中用 `rt_handle.spawn` 拉起，互不等待；发现包中的 `quic_port` 固定使用 `QUIC_DEFAULT_PORT`，不读取服务端实际端口。
 4. **无额外维护任务**：没有任务清理循环，任务只在进程结束时消失。
-5. **关闭清理**：`CloseRequested` 时阻塞式 `stop_discovery_service()`（广播 `Goodbye`）并 `stop_quic_server()`。
+5. **托盘常驻**：`setup` 创建系统托盘（显示主窗口 / 退出）；`CloseRequested` 默认只隐藏窗口、服务继续运行，仅当 `minimize_to_tray=false` 或托盘选「退出」时才阻塞式 `stop_discovery_service()`（广播 `Goodbye`）并 `stop_quic_server()`。
+6. **接收提示**：QUIC 服务接受传输后调用 `emit_incoming_transfer`，同时发 `incoming-transfer` 事件与系统通知。
 
 ## 6. 架构取舍
 

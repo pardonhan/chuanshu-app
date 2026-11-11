@@ -46,17 +46,27 @@ let app_state = Arc::new(AppState::new("我的设备".to_string()));
 5. `rt_handle.spawn(start_discovery_service(state, handle))`。
 6. `rt_handle.spawn(start_quic_server(state))`。
 7. `rt_handle.spawn(transfer::start_progress_updater(state))`。
+8. 创建系统托盘（`TrayIconBuilder`）：菜单为「显示主窗口」「退出」；「退出」置 `SHOULD_QUIT=true`，停止发现/QUIC 服务后 `app.exit(0)`。需 `tauri` 启用 `tray-icon` feature。
 
 ### 关闭流程
 
 ```rust
-tauri::WindowEvent::CloseRequested { .. } => {
-    rt_for_cleanup.block_on(async { network::stop_discovery_service().await.ok(); });
-    network::stop_quic_server();
+tauri::WindowEvent::CloseRequested { api, .. } => {
+    let should_quit = SHOULD_QUIT.load(Ordering::SeqCst);
+    let minimize_to_tray = /* 读设置 minimize_to_tray，默认 true */;
+    if should_quit || !minimize_to_tray {
+        rt_for_cleanup.block_on(async { network::stop_discovery_service().await.ok(); });
+        network::stop_quic_server();
+    } else {
+        api.prevent_close();
+        window.hide();
+    }
 }
 ```
 
-- 在**主线程**上 `block_on`，会阻塞 UI 直到发现服务停止。
+- 默认（`minimize_to_tray=true`）关闭窗口只是**隐藏到托盘**，发现、QUIC、进度更新服务继续运行，可持续接收文件并弹通知。
+- 真正退出（托盘「退出」或关闭该设置）时才执行下面的清理。
+- 清理在**主线程**上 `block_on`，会阻塞 UI 直到发现服务停止。
 - `stop_quic_server()` 是非 async 函数，只关闭 endpoint。
 - 未显式等待/取消 QUIC 服务任务与进度更新任务。
 
@@ -139,6 +149,7 @@ pub struct Settings {
     device_name: String, download_path: String, auto_accept: bool,
     upload_limit: u32, download_limit: u32,
     enable_notification: bool, theme: String,
+    minimize_to_tray: bool,
 }
 pub struct SystemInfo { os, os_version, arch, default_download_path }
 pub struct SendFilesRequest { device_ids: Vec<Uuid>, file_paths: Vec<String> }
@@ -173,6 +184,7 @@ pub const DEVICE_OFFLINE_EVENT: &str = "device-offline";
 pub const TRANSFER_PROGRESS_EVENT: &str = "transfer-progress";
 pub const TRANSFER_COMPLETED_EVENT: &str = "transfer-completed";
 pub const TRANSFER_FAILED_EVENT: &str = "transfer-failed";
+pub const INCOMING_TRANSFER_EVENT: &str = "incoming-transfer";
 ```
 
 | 函数 | 行为 |
@@ -182,6 +194,7 @@ pub const TRANSFER_FAILED_EVENT: &str = "transfer-failed";
 | `emit_transfer_progress(handle, &TransferTaskInfo)` | emit `transfer-progress` |
 | `emit_transfer_completed(handle, task_id, device_name)` | emit `transfer-completed` + 通知「文件已从 X 接收完成」 |
 | `emit_transfer_failed(handle, task_id, error)` | emit `transfer-failed`，载荷 `{ "task_id": ..., "error": ... }` + 通知 |
+| `emit_incoming_transfer(handle, task_id, sender_name, file_count, total_size)` | emit `incoming-transfer`，载荷 `{ task_id, sender_name, file_count, total_size }` + 通知「收到文件传输」 |
 | `send_notification(handle, title, body)` | 先读设置 `enable_notification`，关闭则直接返回；否则 `tauri_plugin_notification` |
 
 > 注意：`emit_transfer_failed` 的 JSON key 是 **`task_id`**，而前端 `onTransferFailed` 期望 **`taskId`**，导致前端 `setTaskStatus(undefined, 'Failed')` 无效。见 [08](08-known-issues.md)。

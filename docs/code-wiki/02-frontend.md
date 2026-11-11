@@ -124,8 +124,8 @@ Props：
 
 ### 3.6 `SettingsPage.tsx`
 
-- 表单字段与后端 `Settings` 一一对应：`device_name`、`download_path`、`auto_accept`、`upload_limit`、`download_limit`、`enable_notification`、`theme`。
-- 初始值：`upload_limit/download_limit = 0`、`auto_accept = false`、`enable_notification = true`、`theme = 'auto'`，随后被 `getSettings()` 覆盖。
+- 表单字段与后端 `Settings` 一一对应：`device_name`、`download_path`、`auto_accept`、`upload_limit`、`download_limit`、`enable_notification`、`theme`、`minimize_to_tray`。
+- 初始值：`upload_limit/download_limit = 0`、`auto_accept = false`、`enable_notification = true`、`theme = 'auto'`、`minimize_to_tray = true`，随后被 `getSettings()` 覆盖。
 - `Form.useWatch` 监听 `theme`，变化即 `applyTheme()`（并 dispatch `theme-change`）。
 - 「开机自启」不是表单字段，单独 `getAutoLaunch()` / `setAutoLaunch(enabled)` 即时保存。
 - 「默认下载路径」通过 `@tauri-apps/plugin-dialog` 的 `open({ directory: true })` 选择（需要 `capabilities/default.json` 中的 `dialog:allow-open`）。
@@ -187,7 +187,7 @@ interface DeviceWithStatus extends DeviceInfo {
 | `DeviceInfo` | `device_id, device_name, os, ip_address, quic_port, protocol_version, capabilities[], last_seen, is_online?` |
 | `KnownDevice` | 同上 + `capabilities: string`（JSON 字符串）、`last_connected`、`created_at` |
 | `TransferTaskInfo` | `task_id, peer_device_name, transfer_type, status, total_size, transferred_size, file_count, current_file, speed, progress, error_message?` |
-| `Settings` | `device_name, download_path, auto_accept, upload_limit, download_limit, enable_notification, theme` |
+| `Settings` | `device_name, download_path, auto_accept, upload_limit, download_limit, enable_notification, theme, minimize_to_tray` |
 | `TransferHistoryEntry` | `task_id, peer_device_name, transfer_type('send'\|'receive'), status, total_size, file_count, file_names, created_at, completed_at` |
 | `SystemInfo` | `os, os_version, arch, default_download_path` |
 | `DeviceStatus` | `'scanning' \| 'connecting' \| 'online' \| 'offline'` |
@@ -222,7 +222,9 @@ DEVICE_STATUS_LABELS = { scanning:'扫描中', connecting:'连接中', online:'�
 | `openFileLocation(filePath)` | `open_file_location` | `{ filePath }` |
 | `resendFiles(deviceId, filePaths)` | `resend_files` | `{ deviceId, filePaths }` |
 
-事件封装：`onDeviceOnline`、`onDeviceOffline`、`onTransferProgress`、`onTransferCompleted`、`onTransferFailed`，均返回 `Promise<UnlistenFn>`。
+事件封装：`onDeviceOnline`、`onDeviceOffline`、`onTransferProgress`、`onTransferCompleted`、`onTransferFailed`、`onIncomingTransfer`，均返回 `Promise<UnlistenFn>`。
+
+`onIncomingTransfer` 在 `App.tsx` 根部订阅（不随页面切换重建），收到后调用 antd `notification.info` 弹出「收到文件传输」提示，与后端的系统通知互为补充。
 
 ### 未被页面使用的前端 API
 

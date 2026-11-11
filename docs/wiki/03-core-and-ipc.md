@@ -98,9 +98,9 @@
 
 ### 4.2 设置相关
 
-`Settings` 字段：`device_name`、`download_path`、`auto_accept`、`upload_limit`、`download_limit`、`enable_notification`、`theme`。
+`Settings` 字段：`device_name`、`download_path`、`auto_accept`、`upload_limit`、`download_limit`、`enable_notification`、`theme`、`minimize_to_tray`。
 
-- `get_settings`：若 `load_settings()` 返回 `Some` 则原样返回；否则返回默认值——设备名 `"我的设备"`、下载目录 `default_download_dir()`、`auto_accept=true`、限速均为 0、通知开启、主题 `"auto"`。
+- `get_settings`：若 `load_settings()` 返回 `Some` 则原样返回；否则返回默认值——设备名 `"我的设备"`、下载目录 `default_download_dir()`、`auto_accept=true`、限速均为 0、通知开启、主题 `"auto"`、`minimize_to_tray=true`。
 - `save_settings`：写库后调用 `state.set_device_name(...)`，因此设备名无需重启即可用于后续心跳。
 
 ### 4.3 历史与设备
@@ -126,7 +126,7 @@
 
 ## 5. 事件
 
-后端共发出 5 种事件：
+后端共发出 6 种事件：
 
 | 事件 | 载荷 | 发射位置 |
 | --- | --- | --- |
@@ -135,23 +135,24 @@
 | `transfer-progress` | `TransferTaskInfo` | `transfer/manager.rs::start_progress_updater` |
 | `transfer-completed` | `Uuid`（任务 ID 字符串） | `ipc::emit_transfer_completed` |
 | `transfer-failed` | `{ "taskId": Uuid, "error": String }` | `ipc::emit_transfer_failed` |
+| `incoming-transfer` | `{ task_id, sender_name, file_count, total_size }` | `ipc::emit_incoming_transfer`（由 `quic_server.rs` 在接受传输后调用） |
 
-`ipc/mod.rs` 只把 completed/failed 事件名定义为常量（`TRANSFER_COMPLETED_EVENT`、`TRANSFER_FAILED_EVENT`）；`transfer-progress` 与两个设备事件使用字符串字面量。
+`ipc/mod.rs` 把 completed/failed/incoming 事件名定义为常量（`TRANSFER_COMPLETED_EVENT`、`TRANSFER_FAILED_EVENT`、`INCOMING_TRANSFER_EVENT`）；`transfer-progress` 与两个设备事件使用字符串字面量。
 
-`emit_transfer_completed` / `emit_transfer_failed` 在发事件的同时调用 `send_notification`：
+`emit_transfer_completed` / `emit_transfer_failed` / `emit_incoming_transfer` 在发事件的同时调用 `send_notification`：
 
 - 通知受 `settings.enable_notification` 控制；读不到设置时默认发送。
-- 标题分别为“传输完成”“传输失败”，正文包含对端设备名或错误文本。
+- 标题分别为“传输完成”“传输失败”“收到文件传输”，正文包含对端设备名、错误文本或文件数量。
 - 使用 `tauri_plugin_notification` 的 `NotificationExt`。
 
 ## 6. 插件与权限
 
 `lib.rs` 注册 4 个插件：`tauri_plugin_fs`、`tauri_plugin_notification`、`tauri_plugin_shell`、`tauri_plugin_dialog`；debug 构建额外注册 `tauri_plugin_log`（级别 `Debug`）。
 
-`src-tauri/capabilities/default.json` 只声明：
+`src-tauri/capabilities/default.json` 声明：
 
 ```json
-["core:default", "dialog:allow-open"]
+["core:default", "dialog:allow-open", "notification:allow-notify"]
 ```
 
-前端因此只能直接使用核心 API 与“选择文件夹”对话框；通知、shell 等能力均由 Rust 侧调用，不经过前端权限。
+前端因此只能直接使用核心 API、“选择文件夹”对话框与通知权限；通知实际由 Rust 侧发送，`notification:allow-notify` 是保证系统通知不被拦截的必要声明。shell 等能力不开放给前端。

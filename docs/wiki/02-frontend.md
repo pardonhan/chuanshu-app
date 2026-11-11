@@ -164,6 +164,7 @@ flowchart TD
 | `onTransferProgress` | `transfer-progress` | `TransferTaskInfo` |
 | `onTransferCompleted` | `transfer-completed` | `taskId` 字符串 |
 | `onTransferFailed` | `transfer-failed` | `{ taskId, error }` |
+| `onIncomingTransfer` | `incoming-transfer` | `{ task_id, sender_name, file_count, total_size }` |
 
 轮询作为兜底同时存在：设备列表 5 秒、任务列表 2 秒。事件与轮询都直接反映后端内存状态，没有本地乐观更新。
 

@@ -119,12 +119,15 @@ sequenceDiagram
     Setup->>Disc: spawn start_discovery_service(state, handle)
     Setup->>Quic: spawn start_quic_server(state)
     Setup->>Prog: spawn start_progress_updater(state)
+    Setup->>Setup: 创建系统托盘（显示主窗口 / 退出）
     Builder->>Builder: run(generate_context!())
 ```
 
 各步骤细节见 [03 后端核心](03-backend-core.md#2-应用入口-librs)。
 
-**窗口关闭**：`on_window_event(CloseRequested)` 中 `block_on(stop_discovery_service())` 并调用 `stop_quic_server()`（仅关闭 QUIC endpoint，不等待任务退出）。
+**系统托盘**：`setup` 中用 `TrayIconBuilder` 创建托盘图标，菜单项为「显示主窗口」「退出」；「退出」先置 `SHOULD_QUIT`，再停止发现/QUIC 服务后 `app.exit(0)`。需 `tauri` 启用 `tray-icon` feature。
+
+**窗口关闭**：`on_window_event(CloseRequested)` 先读设置 `minimize_to_tray`（默认 `true`）。为 `true` 且非托盘“退出”时 `api.prevent_close()` + `window.hide()`，发现、QUIC、进度器继续运行于后台；否则停止发现服务与 QUIC endpoint（仅关闭 endpoint，不等待任务退出）。
 
 ---
 
@@ -300,6 +303,7 @@ graph TD
 | `transfer-progress` | `TransferTaskInfo` | `transfer/manager.rs`（每 100ms 或进度器每 500ms） |
 | `transfer-completed` | `Uuid` | `ipc::emit_transfer_completed` |
 | `transfer-failed` | `{ task_id, error }` | `ipc::emit_transfer_failed` |
+| `incoming-transfer` | `{ task_id, sender_name, file_count, total_size }` | `ipc::emit_incoming_transfer`（`quic_server.rs` 接受传输后调用） |
 
 > 前端类型定义中 `transfer-failed` 的载荷是 `{ taskId, error }`，后端 `serde_json::json!` 用的是 `task_id`——字段名不一致，前端读取不到 `taskId`。见 [08](08-known-issues.md)。
 

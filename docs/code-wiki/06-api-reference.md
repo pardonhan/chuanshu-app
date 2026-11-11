@@ -68,11 +68,13 @@ get_system_info, set_auto_launch, get_auto_launch, open_file_location, resend_fi
 | `transfer-progress` | `TransferTaskInfo` | `manager.rs`（100ms）、`quic_server.rs`（100ms）、`start_progress_updater`（500ms） | `useTransferStore.updateTaskProgress` |
 | `transfer-completed` | `Uuid`（字符串） | `ipc::emit_transfer_completed` | 重新拉取任务 |
 | `transfer-failed` | `{ "task_id": string, "error": string }` | `ipc::emit_transfer_failed` | 期望 `{ taskId, error }`——**字段不匹配** |
+| `incoming-transfer` | `{ task_id: string, sender_name: string, file_count: number, total_size: number }` | `ipc::emit_incoming_transfer` | `onIncomingTransfer`，`App.tsx` 弹应用内通知 |
 
 ### 系统通知
 
 | 触发 | 标题 | 内容 |
 |------|------|------|
+| 收到文件 | `收到文件传输` | `来自 {sender_name} 的文件传输` / `来自 {sender_name} 的 N 个文件` |
 | 接收完成 | `传输完成` | `文件已从 {device_name} 接收完成` |
 | 传输失败 | `传输失败` | `文件传输失败：{error}` |
 | 关闭条件 | `settings.enable_notification == false` | 直接返回 |
@@ -260,7 +262,7 @@ CREATE TABLE known_devices (
 CREATE INDEX idx_known_devices_last_connected ON known_devices(last_connected DESC);
 ```
 
-`settings` 使用的 key：`device_name`、`download_path`、`auto_accept`、`upload_limit`、`download_limit`、`enable_notification`、`theme`（布尔以 `"true"/"false"`，数字以十进制字符串存储）。
+`settings` 使用的 key：`device_name`、`download_path`、`auto_accept`、`upload_limit`、`download_limit`、`enable_notification`、`theme`、`minimize_to_tray`（布尔以 `"true"/"false"`，数字以十进制字符串存储）。
 
 ---
 
@@ -309,7 +311,7 @@ type AppResult<T> = Result<T, AppError>;
 {
   "identifier": "default",
   "windows": ["main"],
-  "permissions": ["core:default", "dialog:allow-open"]
+  "permissions": ["core:default", "dialog:allow-open", "notification:allow-notify"]
 }
 ```
 
